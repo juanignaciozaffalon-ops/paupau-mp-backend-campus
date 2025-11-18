@@ -33,10 +33,22 @@ const FRONTEND_URL          = process.env.FRONTEND_URL || ''; // ej: https://tu-
 const WEBHOOK_SECRET        = process.env.WEBHOOK_SECRET || 'cambia-este-webhook-secret';
 const MONTHLY_FEE           = Number(process.env.MONTHLY_FEE || 50);
 
+// NEW: moneda MP para el campus (por defecto ARS)
+const MP_CURRENCY           = process.env.MP_CURRENCY || 'ARS';
+
 /* ====== CORS ====== */
 app.use((req, res, next) => {
   const reqOrigin = req.headers.origin || '';
-  const ok = ALLOWED.includes(reqOrigin) || (FRONTEND_URL && reqOrigin === new URL(FRONTEND_URL).origin);
+  let ok = ALLOWED.includes(reqOrigin);
+
+  // también permitimos el origin del FRONTEND_URL (campus) si está seteado
+  if (!ok && FRONTEND_URL) {
+    try {
+      const campusOrigin = new URL(FRONTEND_URL).origin;
+      if (campusOrigin === reqOrigin) ok = true;
+    } catch (_) {}
+  }
+
   if (ok) {
     res.header('Access-Control-Allow-Origin', reqOrigin);
     res.header('Vary', 'Origin');
@@ -135,82 +147,131 @@ function currentMonthYear() {
   return `${y}-${m}`;
 }
 
-/**
- * Helper reutilizable para crear la preferencia de pago del CAMPUS
- * - Crea la preferencia en MP con webhook /campus/webhook
- * - Hace upsert en la tabla payments de Supabase para el mes actual
- */
-async function createCampusPreferenceMP({ user_id, amount, currency = 'ARS', extraMetadata = {} }) {
-  if (!supabase) {
-    const err = new Error('supabase_not_configured');
-    throw err;
-  }
-
-  const price = Number(amount || MONTHLY_FEE || 50);
-
-  const pref = {
-    items: [
-      {
-        title: `Cuota PauPau - ${currentMonthYear()}`,
-        quantity: 1,
-        currency_id: currency || 'ARS',
-        unit_price: price
-      }
-    ],
-    back_urls: {
-      success: FRONTEND_URL || '/',
-      failure: FRONTEND_URL || '/',
-      pending: FRONTEND_URL || '/'
-    },
-    auto_return: 'approved',
-    notification_url: `${process.env.RENDER_EXTERNAL_URL || ''}/campus/webhook?secret=${WEBHOOK_SECRET}`,
-    metadata: {
-      user_id,
-      context: 'campus',
-      ...extraMetadata
+// Crear preferencia de pago mensual del campus (con cupones)
+app.post('/campus/create-payment', async (req, res) => {
+  try {
+    if (!supabase) {
+      console.error('[campus/create-payment] Supabase no configurado');
+      return res.status(500).json({ error: 'supabase_not_configured' });
     }
-  };
 
-  const result = await mercadopago.preferences.create(pref);
-  const prefId = result.body.id;
+    const { user_id, amount, coupon_code } = req.body || {};
+    if (!user_id) return res.status(400).json({ error: 'user_id_requerido' });
 
-  await supabase.from('payments').upsert(
-    {
+    const fullAmount = Number(amount || MONTHLY_FEE || 50);
+    if (!(fullAmount > 0)) {
+      return res.status(400).json({ error: 'amount_invalido' });
+    }
+
+    let discountPercent = 0;
+    let normalizedCoupon = null;
+
+    // Buscar cupón solo si viene algo
+    if (coupon_code && String(coupon_code).trim()) {
+      normalizedCoupon = String(coupon_code).trim().toLowerCase();
+
+      const { data: rows, error: cErr } = await supabase
+        .from('coupons')
+        .select('id, code, discount_percent, is_active, valid_from, valid_until, usage_limit, usage_count')
+        .eq('code', normalizedCoupon)
+        .limit(1);
+
+      if (cErr) {
+        console.error('[campus/create-payment] Error buscando cupón:', cErr);
+        return res.status(500).json({ error: 'coupon_lookup_failed' });
+      }
+
+      const coupon = rows && rows[0];
+      const now = new Date();
+
+      if (!coupon || !coupon.is_active) {
+        return res.status(400).json({ error: 'invalid_coupon' });
+      }
+
+      if (coupon.valid_from && new Date(coupon.valid_from) > now) {
+        return res.status(400).json({ error: 'coupon_not_started' });
+      }
+
+      if (coupon.valid_until && new Date(coupon.valid_until) < now) {
+        return res.status(400).json({ error: 'coupon_expired' });
+      }
+
+      if (coupon.usage_limit && coupon.usage_count >= coupon.usage_limit) {
+        return res.status(400).json({ error: 'coupon_limit_reached' });
+      }
+
+      discountPercent = Number(coupon.discount_percent || 0);
+      normalizedCoupon = coupon.code; // normalizado como está en la DB
+    }
+
+    // Calculamos el monto final con descuento
+    let finalAmount = fullAmount;
+    if (discountPercent > 0) {
+      finalAmount = +(fullAmount * (1 - discountPercent / 100)).toFixed(2);
+      if (finalAmount < 0.01) finalAmount = 0.01;
+    }
+
+    const pref = {
+      items: [
+        {
+          title: `Cuota PauPau - ${currentMonthYear()}`,
+          quantity: 1,
+          currency_id: MP_CURRENCY,
+          unit_price: finalAmount
+        }
+      ],
+      back_urls: {
+        success: FRONTEND_URL || '/',
+        failure: FRONTEND_URL || '/',
+        pending: FRONTEND_URL || '/'
+      },
+      auto_return: 'approved',
+      notification_url: `${process.env.RENDER_EXTERNAL_URL || ''}/campus/webhook?secret=${WEBHOOK_SECRET}`,
+      metadata: {
+        user_id,
+        context: 'campus',
+        coupon_code: normalizedCoupon,
+        discount_percent: discountPercent,
+        full_amount: fullAmount,
+        final_amount: finalAmount
+      }
+    };
+
+    const result = await mercadopago.preferences.create(pref);
+    const prefId = result.body.id;
+
+    // Insertamos/actualizamos intento de pago del mes actual (user_id + month_year)
+    const upsertData = {
       user_id,
       month_year: currentMonthYear(),
       status: 'pending',
-      amount: price,
+      amount: fullAmount,
+      final_amount: finalAmount,
+      discount_percent: discountPercent,
+      coupon_code: normalizedCoupon,
       mp_preference_id: prefId,
       context: 'campus'
-    },
-    { onConflict: 'user_id,month_year' }
-  );
+    };
 
-  return {
-    init_point: result.body.init_point,
-    preference_id: prefId
-  };
-}
+    const { error: upErr } = await supabase
+      .from('payments')
+      .upsert(upsertData, { onConflict: 'user_id,month_year' });
 
-// Crear preferencia de pago mensual del campus
-app.post('/campus/create-payment', async (req, res) => {
-  try {
-    const { user_id, amount, currency = 'ARS', metadata = {} } = req.body || {};
-    if (!user_id) return res.status(400).json({ error: 'user_id requerido' });
+    if (upErr) {
+      console.error('[campus/create-payment] Error upsert payments:', upErr);
+      // No rompemos el pago de MP, solo avisamos
+    }
 
-    const out = await createCampusPreferenceMP({
-      user_id,
-      amount,
-      currency,
-      extraMetadata: metadata
+    return res.json({
+      init_point: result.body.init_point,
+      preference_id: prefId,
+      full_amount: fullAmount,
+      final_amount: finalAmount,
+      discount_percent: discountPercent,
+      coupon_code: normalizedCoupon
     });
-
-    return res.json(out);
   } catch (err) {
     console.error('[campus/create-payment] error', err);
-    if (err.message === 'supabase_not_configured') {
-      return res.status(500).json({ error: 'supabase_not_configured' });
-    }
     return res.status(500).json({ error: 'create_preference_failed' });
   }
 });
@@ -232,7 +293,10 @@ app.post('/campus/webhook', async (req, res) => {
     if (user_id) {
       await supabase
         .from('payments')
-        .update({ status, mp_payment_id: String(paymentId) })
+        .update({
+          status,
+          mp_payment_id: String(paymentId)
+        })
         .eq('user_id', user_id)
         .eq('month_year', currentMonthYear());
     }
@@ -296,7 +360,10 @@ app.post('/hold', async (req, res) => {
         )
     `;
     const can = await pool.query(canQ, [horario_id]);
-    if (can.rowCount === 0) { await pool.query('ROLLBACK'); return res.status(409).json({ error: 'not_available' }); }
+    if (can.rowCount === 0) {
+      await pool.query('ROLLBACK');
+      return res.status(409).json({ error: 'not_available' });
+    }
 
     const insQ = `
       INSERT INTO reservas (horario_id, alumno_nombre, alumno_email, estado, reservado_hasta)
@@ -335,39 +402,11 @@ app.post('/crear-preferencia', async (req, res) => {
   let list = Array.isArray(horarios_ids) ? horarios_ids.map(Number).filter(Boolean) : [];
   if (!list.length && Number(horario_id)) list = [Number(horario_id)];
 
-  // 🔹 Detectamos si es un pago del CAMPUS (cuota mensual)
-  const isCampusPayment =
-    metadata && metadata.user_id && !form && !list.length;
-
   // Para INDIVIDUAL requerimos horarios; para GRUPAL no
-  if (modalidad === 'individual' && !list.length && !isCampusPayment) {
+  if (modalidad === 'individual' && !list.length) {
     return res.status(400).json({ error: 'bad_request', message: 'horarios_ids o horario_id requerido para modalidad individual' });
   }
 
-  // 🔹 Si es CAMPUS, usamos la lógica especial y NO tocamos reservas/horarios
-  if (isCampusPayment) {
-    try {
-      const out = await createCampusPreferenceMP({
-        user_id: metadata.user_id,
-        amount: price,
-        currency,
-        extraMetadata: metadata
-      });
-
-      return res.json({
-        init_point: out.init_point,
-        preference_id: out.preference_id
-      });
-    } catch (e) {
-      console.error('[crear-preferencia campus] error', e);
-      const msg = e.message === 'supabase_not_configured'
-        ? 'supabase_not_configured'
-        : 'campus_payment_failed';
-      return res.status(500).json({ error: msg });
-    }
-  }
-
-  // ======= FLUJO ORIGINAL DE INSCRIPCIÓN (NO CAMPUS) =======
   const name  = (alumno_nombre && String(alumno_nombre).trim()) || 'N/A';
   const email = (alumno_email  && String(alumno_email).trim())  || 'noemail@paupau.local';
 
@@ -394,7 +433,10 @@ app.post('/crear-preferencia', async (req, res) => {
           )
       `;
       const can = await pool.query(canQ, [list]);
-      if (can.rowCount !== list.length) { await pool.query('ROLLBACK'); return res.status(409).json({ error: 'not_available' }); }
+      if (can.rowCount !== list.length) {
+        await pool.query('ROLLBACK');
+        return res.status(409).json({ error: 'not_available' });
+      }
 
       // insertar reservas pendientes (hold 10 min)
       const insQ = `
@@ -403,7 +445,13 @@ app.post('/crear-preferencia', async (req, res) => {
         RETURNING id
       `;
       for (const hid of list) {
-        const r = await pool.query(insQ, [hid, name, email, groupRef, form ? JSON.stringify(form) : JSON.stringify({})]);
+        const r = await pool.query(insQ, [
+          hid,
+          name,
+          email,
+          groupRef,
+          form ? JSON.stringify(form) : JSON.stringify({})
+        ]);
         reservasIds.push(r.rows[0].id);
       }
 
