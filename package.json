@@ -1,25 +1,20 @@
 {
-  "name": "paupap-mp-backend",
+  "name": "paupau-mp-backend",
   "version": "1.0.0",
-  "description": "Backend para pagos con Mercado Pago + Campus PauPau",
+  "description": "Backend central de PauPau para pagos con Mercado Pago, cupones y comprobantes",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
   },
   "dependencies": {
-    "@supabase/supabase-js": "^2.46.1",
-    "dotenv": "^16.4.5",
-    "body-parser": "^2.2.0",
+    "@supabase/supabase-js": "^2.45.0",
     "cors": "^2.8.5",
-    "express": "4.18.2",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
     "mercadopago": "1.5.17",
-    "pg": "^8.16.3",
-    "nodemailer": "^6.9.14"
+    "multer": "^1.4.5-lts.1"
   },
-  "repository": {
-    "type": "git",
-    "url": "https://github.com/juanignaciozaffalon-ops/paupau-mp-backend.git"
-  },
-  "author": "",
-  "license": "ISC"
+  "engines": {
+    "node": ">=18 <23"
+  }
 }
