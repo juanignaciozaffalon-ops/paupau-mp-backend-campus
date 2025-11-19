@@ -23,6 +23,7 @@ mercadopago.configure({
 ============================ */
 const supabaseUrl = process.env.SUPABASE_URL || null;
 const supabaseKey =
+  process.env.SUPABASE_SERVICE_ROLE || // tu variable principal en Render
   process.env.SUPABASE_SERVICE_KEY ||
   process.env.SUPABASE_SERVICE_ROLE_KEY ||
   process.env.SUPABASE_SECRET ||
@@ -46,7 +47,9 @@ const monthStr = () => new Date().toISOString().slice(0, 7);
 /* ============================
    EXPRESS + CORS
 ============================ */
-const allowedOrigins = [
+
+// dominios base permitidos
+const baseAllowedOrigins = [
   "https://paupaulanguages.com",
   "https://www.paupaulanguages.com",
   "https://paupaulanguages.odoo.com",
@@ -54,6 +57,17 @@ const allowedOrigins = [
   "http://localhost:3000",
   "http://localhost:5173",
 ];
+
+// si tenés la variable ALLOWED_ORIGIN en Render, la sumamos
+let extraAllowed = [];
+if (process.env.ALLOWED_ORIGIN) {
+  extraAllowed = process
+    .env.ALLOWED_ORIGIN.split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+const allowedOrigins = [...new Set([...baseAllowedOrigins, ...extraAllowed])];
 
 app.use(
   cors({
@@ -107,7 +121,7 @@ app.post("/coupon/apply", async (req, res) => {
 
     const normalizedCode = String(code).toLowerCase();
 
-    // IMPORTANTE: ya NO filtramos por "active" para evitar errores
+    // NO filtramos por "active" para evitar errores si la columna no existe
     const { data: coupons, error: couponErr } = await supabase
       .from("coupons")
       .select("*")
