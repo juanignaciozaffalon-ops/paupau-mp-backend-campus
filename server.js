@@ -105,11 +105,13 @@ app.post("/coupon/apply", async (req, res) => {
       });
     }
 
+    const normalizedCode = String(code).toLowerCase();
+
+    // IMPORTANTE: ya NO filtramos por "active" para evitar errores
     const { data: coupons, error: couponErr } = await supabase
       .from("coupons")
       .select("*")
-      .eq("code", String(code).toLowerCase())
-      .eq("active", true)
+      .eq("code", normalizedCode)
       .limit(1);
 
     if (couponErr) {
@@ -128,9 +130,21 @@ app.post("/coupon/apply", async (req, res) => {
     }
 
     const coupon = coupons[0];
-    const discountPercent = Number(coupon.discount_percent || 0);
 
-    // Registrar uso (opcional)
+    // Tomamos el porcentaje de descuento de la columna que ya tenés
+    const discountPercent = Number(
+      coupon.discount_percent ?? coupon.percentage ?? 0
+    );
+
+    // Si tenés una columna "active" y está en false, lo tratamos como inactivo.
+    if (coupon.active === false) {
+      return res.json({
+        ok: false,
+        msg: "Cupón inválido o inactivo.",
+      });
+    }
+
+    // Registrar uso (opcional, si existe la tabla coupon_uses)
     try {
       await supabase.from("coupon_uses").insert({
         coupon_id: coupon.id,
