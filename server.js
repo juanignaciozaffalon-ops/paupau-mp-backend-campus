@@ -31,9 +31,10 @@ mercadopago.configure({
 // ============================
 // SUPABASE (service role)
 // ============================
+// DESPUÉS
 const supabase = createClient(
   process.env.SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_ROLE_KEY // IMPORTANTE: service role, no anon
+  process.env.SUPABASE_SERVICE_ROLE || process.env.SUPABASE_KEY
 );
 
 // ============================
