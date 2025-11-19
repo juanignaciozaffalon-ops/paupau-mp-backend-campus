@@ -1,10 +1,4 @@
 // server.js – Backend PauPau (Mercado Pago + cupones + comprobantes)
-//
-// ENV necesarios en Render:
-// MP_ACCESS_TOKEN
-// SUPABASE_URL
-// SUPABASE_SERVICE_KEY  (o SUPABASE_KEY)
-// FRONTEND_URL  (ej: https://paupaulanguages.com)
 
 require("dotenv").config();
 
@@ -25,20 +19,25 @@ mercadopago.configure({
 });
 
 /* ============================
-   SUPABASE (con fallback de key)
+   SUPABASE (acepta varios nombres de KEY)
 ============================ */
 const supabaseUrl = process.env.SUPABASE_URL || null;
 const supabaseKey =
-  process.env.SUPABASE_SERVICE_KEY || process.env.SUPABASE_KEY || null;
+  process.env.SUPABASE_SERVICE_KEY ||
+  process.env.SUPABASE_SERVICE_ROLE_KEY ||
+  process.env.SUPABASE_SECRET ||
+  process.env.SUPABASE_KEY ||
+  null;
 
 let supabase = null;
 
 if (!supabaseUrl || !supabaseKey) {
   console.warn(
-    "⚠️ Supabase no está bien configurado (SUPABASE_URL o KEY faltan). " +
-      "Cupones / comprobantes / webhook van a funcionar limitado."
+    "⚠️ Supabase NO configurado (falta SUPABASE_URL o KEY). " +
+      "Cupones y comprobantes estarán desactivados."
   );
 } else {
+  console.log("✅ Supabase configurado con URL:", supabaseUrl);
   supabase = createClient(supabaseUrl, supabaseKey);
 }
 
@@ -51,7 +50,7 @@ const allowedOrigins = [
   "https://paupaulanguages.com",
   "https://www.paupaulanguages.com",
   "https://paupaulanguages.odoo.com",
-  "https://famous-lily-8e39ce.netlify.app", // CAMPUS NETLIFY
+  "https://famous-lily-8e39ce.netlify.app", // campus
   "http://localhost:3000",
   "http://localhost:5173",
 ];
@@ -72,14 +71,14 @@ app.use(
 app.use(express.json({ limit: "2mb" }));
 app.use(express.urlencoded({ extended: true }));
 
-// Multer para recibir comprobantes
+// Multer para comprobantes
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 10 * 1024 * 1024 }, // 10 MB
+  limits: { fileSize: 10 * 1024 * 1024 },
 });
 
 /* ============================
-   RUTA PRINCIPAL
+   ROOT
 ============================ */
 app.get("/", (req, res) => {
   res.json({ ok: true, msg: "Backend PauPau funcionando" });
@@ -100,7 +99,6 @@ app.post("/coupon/apply", async (req, res) => {
     }
 
     if (!supabase) {
-      console.warn("⚠️ /coupon/apply sin Supabase configurado.");
       return res.json({
         ok: false,
         msg: "El sistema de cupones no está disponible en este momento.",
@@ -132,7 +130,7 @@ app.post("/coupon/apply", async (req, res) => {
     const coupon = coupons[0];
     const discountPercent = Number(coupon.discount_percent || 0);
 
-    // Registrar uso (opcional, si existe tabla coupon_uses)
+    // Registrar uso (opcional)
     try {
       await supabase.from("coupon_uses").insert({
         coupon_id: coupon.id,
@@ -141,7 +139,7 @@ app.post("/coupon/apply", async (req, res) => {
         discount_percent: discountPercent,
       });
     } catch (e) {
-      console.warn("No se pudo registrar uso de cupón (puede no existir la tabla).");
+      console.warn("No se pudo registrar uso de cupón (tabla opcional).");
     }
 
     return res.json({
@@ -159,8 +157,7 @@ app.post("/coupon/apply", async (req, res) => {
 });
 
 /* ============================
-   CREAR PREFERENCIA MP
-   /crear-preferencia
+   CREAR PREFERENCIA – /crear-preferencia
 ============================ */
 app.post("/crear-preferencia", async (req, res) => {
   try {
@@ -218,7 +215,7 @@ app.post("/webhook/mp", async (req, res) => {
     console.log("Webhook MP:", JSON.stringify(body));
 
     if (!supabase) {
-      console.warn("⚠️ Webhook MP sin Supabase configurado.");
+      console.warn("Webhook recibido sin Supabase configurado.");
       return res.status(200).send("ok");
     }
 
@@ -257,8 +254,7 @@ app.post("/webhook/mp", async (req, res) => {
 });
 
 /* ============================
-   SUBIR COMPROBANTE
-   /payments/upload-receipt
+   SUBIR COMPROBANTE – /payments/upload-receipt
 ============================ */
 app.post(
   "/payments/upload-receipt",
@@ -276,7 +272,6 @@ app.post(
       }
 
       if (!supabase) {
-        console.warn("⚠️ /payments/upload-receipt sin Supabase configurado.");
         return res.json({
           ok: false,
           msg: "El sistema de comprobantes no está disponible.",
@@ -316,7 +311,7 @@ app.post(
         });
       } catch (e) {
         console.warn(
-          "No se pudo insertar en payment_receipts (puede no existir la tabla)."
+          "No se pudo insertar en payment_receipts (tabla opcional)."
         );
       }
 
