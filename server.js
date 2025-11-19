@@ -3,7 +3,6 @@ require('dotenv').config();
 
 const express = require('express');
 const cors = require('cors');
-const bodyParser = require('body-parser');
 const mercadopago = require('mercadopago');
 const { createClient } = require('@supabase/supabase-js');
 const multer = require('multer');
@@ -16,8 +15,8 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 app.use(cors());
-app.use(bodyParser.json());
-app.use(bodyParser.urlencoded({ extended: true }));
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
 
 // Para subir archivos (comprobantes)
 const upload = multer({ storage: multer.memoryStorage() });
