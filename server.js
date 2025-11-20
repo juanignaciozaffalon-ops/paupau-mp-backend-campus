@@ -1,520 +1,313 @@
-// server.js
-require('dotenv').config();
+// server.js - Backend central PauPau (Render)
+// Maneja: Mercado Pago, cupones, comprobantes y Supabase
 
-const express = require('express');
-const cors = require('cors');
-const mercadopago = require('mercadopago');
-const { createClient } = require('@supabase/supabase-js');
-const multer = require('multer');
-const path = require('path');
+const express = require("express");
+const cors = require("cors");
+const mercadopago = require("mercadopago");
+const multer = require("multer");
+const { createClient } = require("@supabase/supabase-js");
 
-// ============================
-// CONFIGURACIÓN BÁSICA
-// ============================
 const app = express();
-const PORT = process.env.PORT || 3000;
 
-app.use(cors());
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+// === CONFIGURACIÓN DESDE ENV ===
+// En Render tenés que definir estas variables:
+// SUPABASE_URL
+// SUPABASE_SERVICE_ROLE_KEY
+// MERCADOPAGO_ACCESS_TOKEN
+// FRONTEND_URL  -> ej: https://paupaulanguages.com
+const {
+  SUPABASE_URL,
+  SUPABASE_SERVICE_ROLE_KEY,
+  MERCADOPAGO_ACCESS_TOKEN,
+  FRONTEND_URL,
+} = process.env;
 
-// Para subir archivos (comprobantes)
-const upload = multer({ storage: multer.memoryStorage() });
+if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
+  console.error("Faltan SUPABASE_URL o SUPABASE_SERVICE_ROLE_KEY en ENV");
+}
+if (!MERCADOPAGO_ACCESS_TOKEN) {
+  console.error("Falta MERCADOPAGO_ACCESS_TOKEN en ENV");
+}
+if (!FRONTEND_URL) {
+  console.warn("No definiste FRONTEND_URL en ENV. Uso window.location.origin en el front.");
+}
 
-// ============================
-// MERCADO PAGO
-// ============================
-mercadopago.configure({
-  access_token: process.env.MP_ACCESS_TOKEN
-});
+// === CORS ===
+// Ajustá los orígenes permitidos según tus dominios reales
+const allowedOrigins = [
+  "https://paupaulanguages.com",
+  "https://www.paupaulanguages.com",
+  "https://paupaulanguages.odoo.com",
+  "http://localhost:8069",
+  "http://localhost:3000",
+];
 
-// ============================
-// SUPABASE (service role)
-// ============================
-// DESPUÉS
-const supabase = createClient(
-  process.env.SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_ROLE || process.env.SUPABASE_KEY
+app.use(
+  cors({
+    origin: function (origin, callback) {
+      // Permitir herramientas tipo Postman (sin origin)
+      if (!origin) return callback(null, true);
+      if (allowedOrigins.includes(origin)) return callback(null, true);
+      // Podés loguear si querés ver qué está pegando
+      console.warn("CORS bloqueado para origen:", origin);
+      return callback(null, false);
+    },
+  })
 );
 
-// ============================
-// HELPERS
-// ============================
-function getCurrentBillingMonth() {
-  const now = new Date();
-  return new Date(now.getFullYear(), now.getMonth(), 1); // primer día del mes
-}
+app.use(express.json());
 
-function parseBillingMonth(str) {
-  // Espera "YYYY-MM"
-  const [year, month] = str.split('-').map(Number);
-  return new Date(year, month - 1, 1);
-}
+// === MULTER para archivos (comprobantes) ===
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 10 * 1024 * 1024 }, // 10 MB
+});
 
-function toISODate(d) {
-  return d.toISOString().slice(0, 10); // YYYY-MM-DD
-}
+// === SUPABASE SERVICE CLIENT (full power) ===
+const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
-// ============================
-// ENDPOINT: Crear preferencia MP
-// ============================
-//
-// Espera body:
-// {
-//   student_id: "uuid",
-//   amount: 100,
-//   currency: "ARS" (opcional),
-//   coupon_code: "nachoprueba" (opcional),
-//   billing_month: "2025-11" (opcional, si no se manda, usa mes actual)
-// }
-//
-app.post('/api/payments/create-preference', async (req, res) => {
+// === MERCADO PAGO ===
+mercadopago.configure({
+  access_token: MERCADOPAGO_ACCESS_TOKEN,
+});
+
+// Simple health check
+app.get("/", (req, res) => {
+  res.send("PauPau backend OK");
+});
+
+/* ============================================================
+   1) ENDPOINT CREAR PREFERENCIA MERCADO PAGO
+   - Usado por el campus para pagar la cuota mensual
+   - Recibe: { title, price, currency, back_urls, metadata }
+   - Devuelve: { init_point }
+============================================================ */
+app.post("/crear-preferencia", async (req, res) => {
   try {
-    const { student_id, amount, currency = 'ARS', coupon_code, billing_month } = req.body;
+    const { title, price, currency, back_urls, metadata } = req.body || {};
 
-    if (!student_id || !amount) {
-      return res.status(400).json({ error: 'student_id y amount son requeridos' });
-    }
-
-    const billingMonthDate = billing_month
-      ? parseBillingMonth(billing_month)
-      : getCurrentBillingMonth();
-
-    const billingMonthISO = toISODate(billingMonthDate);
-
-    let finalAmount = Number(amount);
-
-    // ============================
-    // 1) Validar cupón (si hay)
-    // ============================
-    let appliedCoupon = null;
-
-    if (coupon_code) {
-      const { data: coupon, error: couponError } = await supabase
-        .from('coupons')
-        .select('*')
-        .eq('code', coupon_code)
-        .eq('is_active', true)
-        .maybeSingle();
-
-      if (couponError) {
-        console.error('Error buscando cupón:', couponError);
-      } else if (coupon) {
-        const today = new Date();
-        const validFrom = coupon.valid_from ? new Date(coupon.valid_from) : null;
-        const validUntil = coupon.valid_until ? new Date(coupon.valid_until) : null;
-
-        const isValidDate =
-          (!validFrom || today >= validFrom) &&
-          (!validUntil || today <= validUntil);
-
-        if (isValidDate) {
-          const discount = (finalAmount * Number(coupon.discount_percent)) / 100;
-          finalAmount = Math.max(0, finalAmount - discount);
-          appliedCoupon = coupon.code;
-        }
-      }
-    }
-
-    // ============================
-    // 2) Anti doble pago
-    // ============================
-    const { data: existingPayment, error: existingError } = await supabase
-      .from('payments')
-      .select('*')
-      .eq('student_id', student_id)
-      .eq('billing_month', billingMonthISO)
-      .maybeSingle();
-
-    if (existingError) {
-      console.error('Error buscando payment existente:', existingError);
-    }
-
-    if (
-      existingPayment &&
-      ['receipt_uploaded', 'approved'].includes(existingPayment.status)
-    ) {
+    if (!price || !currency) {
       return res.status(400).json({
-        error:
-          'Ya tenés un pago con comprobante registrado para este mes. Si hay un error, comunicate con administración.'
+        ok: false,
+        msg: "Faltan datos para crear la preferencia (price / currency).",
       });
     }
 
-    // Crear o actualizar el registro de pago del mes
-    let paymentId = existingPayment ? existingPayment.id : null;
-
-    if (!paymentId) {
-      const { data: inserted, error: insertError } = await supabase
-        .from('payments')
-        .insert({
-          student_id,
-          billing_month: billingMonthISO,
-          amount: finalAmount,
-          currency,
-          status: 'pending',
-          coupon_code: appliedCoupon
-        })
-        .select()
-        .maybeSingle();
-
-      if (insertError) {
-        console.error('Error creando payment:', insertError);
-        return res.status(500).json({ error: 'No se pudo crear el pago' });
-      }
-
-      paymentId = inserted.id;
-    } else {
-      // Actualizar datos si ya existía
-      const { error: updateError } = await supabase
-        .from('payments')
-        .update({
-          amount: finalAmount,
-          currency,
-          coupon_code: appliedCoupon
-        })
-        .eq('id', paymentId);
-
-      if (updateError) {
-        console.error('Error actualizando payment:', updateError);
-      }
-    }
-
-    // Si el monto quedó en 0 (por cupón del 100%), no creamos preferencia MP
-    if (finalAmount === 0) {
-      // Marcamos como "paid" directamente
-      const { error: zeroPayError } = await supabase
-        .from('payments')
-        .update({ status: 'paid' })
-        .eq('id', paymentId);
-
-      if (zeroPayError) {
-        console.error('Error marcando pago 0 como paid:', zeroPayError);
-        return res.status(500).json({ error: 'No se pudo marcar el pago como paid' });
-      }
-
-      return res.json({
-        init_point: null,
-        message: 'Cuota cubierta por cupón. Por favor, subí el comprobante si corresponde.'
-      });
-    }
-
-    // ============================
-    // 3) Crear preferencia en MP
-    // ============================
     const preference = {
       items: [
         {
-          title: 'Cuota mensual Campus PauPau',
+          title: title || "Pago PauPau",
           quantity: 1,
-          unit_price: Number(finalAmount),
-          currency_id: currency
-        }
+          currency_id: currency,
+          unit_price: Number(price),
+        },
       ],
-      metadata: {
-        student_id,
-        payment_id: paymentId,
-        billing_month: billingMonthISO
+      back_urls: back_urls || {
+        success: FRONTEND_URL || "https://paupaulanguages.com",
+        failure: FRONTEND_URL || "https://paupaulanguages.com",
+        pending: FRONTEND_URL || "https://paupaulanguages.com",
       },
-      notification_url: process.env.MP_WEBHOOK_URL,
-      back_urls: {
-        success: process.env.MP_SUCCESS_URL,
-        failure: process.env.MP_FAILURE_URL,
-        pending: process.env.MP_PENDING_URL
-      },
-      auto_return: 'approved'
+      auto_return: "approved",
+      metadata: metadata || {},
     };
 
-    const mpResponse = await mercadopago.preferences.create(preference);
+    const mpResp = await mercadopago.preferences.create(preference);
 
-    return res.json({
-      init_point: mpResponse.body.init_point,
-      id: mpResponse.body.id
-    });
-  } catch (err) {
-    console.error('Error en create-preference:', err);
-    return res.status(500).json({ error: 'Error interno al crear preferencia' });
-  }
-});
-
-// ============================
-// WEBHOOK MP: marca status = 'paid'
-// ============================
-app.post('/api/payments/mp-webhook', async (req, res) => {
-  try {
-    const { type, data } = req.body;
-
-    if (type !== 'payment') {
-      return res.status(200).send('ok');
-    }
-
-    const paymentId = data.id;
-
-    const paymentInfo = await mercadopago.payment.findById(paymentId);
-
-    const mpData = paymentInfo.body;
-
-    if (mpData.status === 'approved') {
-      const metadata = mpData.metadata || {};
-      const payment_id = metadata.payment_id;
-      const student_id = metadata.student_id;
-      const billing_month = metadata.billing_month;
-
-      if (!payment_id || !student_id || !billing_month) {
-        console.error('Metadata incompleta en MP:', metadata);
-      } else {
-        const { error: updateError } = await supabase
-          .from('payments')
-          .update({
-            status: 'paid',
-            mp_payment_id: String(paymentId),
-            updated_at: new Date().toISOString()
-          })
-          .eq('id', payment_id);
-
-        if (updateError) {
-          console.error('Error actualizando payment a paid:', updateError);
-        }
-      }
-    }
-
-    res.status(200).send('ok');
-  } catch (err) {
-    console.error('Error en mp-webhook:', err);
-    res.status(500).send('error');
-  }
-});
-
-// ============================
-// SUBIDA DE COMPROBANTE:
-// Desbloquea automáticamente el campus
-// ============================
-//
-// FormData:
-// - student_id
-// - billing_month (YYYY-MM)
-// - file (campo "receipt")
-//
-app.post('/api/payments/upload-receipt', upload.single('receipt'), async (req, res) => {
-  try {
-    const { student_id, billing_month } = req.body;
-    const file = req.file;
-
-    if (!student_id || !billing_month || !file) {
-      return res.status(400).json({ error: 'student_id, billing_month y archivo son requeridos' });
-    }
-
-    const billingMonthDate = parseBillingMonth(billing_month);
-    const billingMonthISO = toISODate(billingMonthDate);
-
-    // Buscar o crear payment del mes
-    const { data: existingPayment, error: existingError } = await supabase
-      .from('payments')
-      .select('*')
-      .eq('student_id', student_id)
-      .eq('billing_month', billingMonthISO)
-      .maybeSingle();
-
-    if (existingError) {
-      console.error('Error buscando payment en upload-receipt:', existingError);
-      return res.status(500).json({ error: 'Error interno al buscar payment' });
-    }
-
-    let paymentId = existingPayment ? existingPayment.id : null;
-
-    if (!paymentId) {
-      // Si no existía, lo creamos con amount 0 (por ejemplo, pago en efectivo)
-      const { data: inserted, error: insertError } = await supabase
-        .from('payments')
-        .insert({
-          student_id,
-          billing_month: billingMonthISO,
-          amount: 0,
-          currency: 'USD',
-          status: 'pending'
-        })
-        .select()
-        .maybeSingle();
-
-      if (insertError) {
-        console.error('Error creando payment en upload-receipt:', insertError);
-        return res.status(500).json({ error: 'No se pudo crear el registro de pago' });
-      }
-
-      paymentId = inserted.id;
-    }
-
-    // Subir a Supabase Storage (bucket "receipts")
-    const ext = path.extname(file.originalname) || '.pdf';
-    const filePath = `${student_id}/${billingMonthISO}_${Date.now()}${ext}`;
-
-    const { data: storageData, error: storageError } = await supabase.storage
-      .from('receipts')
-      .upload(filePath, file.buffer, {
-        contentType: file.mimetype,
-        upsert: true
+    if (!mpResp || !mpResp.body || !mpResp.body.init_point) {
+      console.error("Respuesta inesperada de Mercado Pago:", mpResp);
+      return res.status(500).json({
+        ok: false,
+        msg: "No se pudo generar la preferencia de Mercado Pago.",
       });
-
-    if (storageError) {
-      console.error('Error subiendo archivo a storage:', storageError);
-      return res.status(500).json({ error: 'No se pudo subir el comprobante' });
-    }
-
-    // URL pública
-    const { data: publicUrlData } = supabase.storage
-      .from('receipts')
-      .getPublicUrl(storageData.path);
-
-    const publicUrl = publicUrlData.publicUrl;
-
-    // Actualizar payment: marcar como receipt_uploaded y desbloquear
-    const { error: updateError } = await supabase
-      .from('payments')
-      .update({
-        status: 'receipt_uploaded',
-        receipt_url: publicUrl,
-        updated_at: new Date().toISOString()
-      })
-      .eq('id', paymentId);
-
-    if (updateError) {
-      console.error('Error actualizando payment con comprobante:', updateError);
-      return res.status(500).json({ error: 'No se pudo actualizar el registro de pago' });
     }
 
     return res.json({
-      message: 'Comprobante subido correctamente. Tu acceso al campus ya está habilitado.',
-      receipt_url: publicUrl
+      ok: true,
+      init_point: mpResp.body.init_point,
     });
   } catch (err) {
-    console.error('Error en upload-receipt:', err);
-    return res.status(500).json({ error: 'Error interno al subir comprobante' });
+    console.error("Error en /crear-preferencia:", err);
+    return res.status(500).json({
+      ok: false,
+      msg: "Error interno creando preferencia de pago.",
+    });
   }
 });
 
-// ============================
-// ESTADO DEL ALUMNO (bloqueo día 7)
-// ============================
-//
-// GET /api/payments/status/:student_id
-//
-app.get('/api/payments/status/:student_id', async (req, res) => {
+/* ============================================================
+   2) ENDPOINT CUPONES: /coupon/apply
+   - Recibe: { user_id, month, code }
+   - Busca en tabla coupons (Supabase)
+   - Devuelve:
+     - ok: true, discount_percent
+     - ok: false, msg
+============================================================ */
+app.post("/coupon/apply", async (req, res) => {
   try {
-    const { student_id } = req.params;
-    const now = new Date();
-    const billingMonthDate = getCurrentBillingMonth();
-    const billingMonthISO = toISODate(billingMonthDate);
-
-    const day = now.getDate();
-
-    const { data: payment, error: paymentError } = await supabase
-      .from('payments')
-      .select('*')
-      .eq('student_id', student_id)
-      .eq('billing_month', billingMonthISO)
-      .maybeSingle();
-
-    if (paymentError) {
-      console.error('Error obteniendo payment status:', paymentError);
-      return res.status(500).json({ error: 'Error obteniendo estado de pago' });
+    const { user_id, month, code } = req.body || {};
+    if (!user_id || !code) {
+      return res.status(400).json({
+        ok: false,
+        msg: "Faltan user_id o code.",
+      });
     }
 
-    let isBlocked = false;
-    let status = payment ? payment.status : 'pending';
-    let message = '';
-
-    const hasUnlockedStatus =
-      payment && ['receipt_uploaded', 'approved'].includes(payment.status);
-
-    if (hasUnlockedStatus) {
-      isBlocked = false;
-      message = 'Tu pago está al día y tu acceso al campus está habilitado.';
-    } else {
-      // No hay comprobante cargado
-      if (!payment || payment.status === 'pending') {
-        if (day <= 7) {
-          isBlocked = false;
-          message =
-            'Recordá realizar tu pago y subir el comprobante antes del día 7 para mantener el acceso al campus.';
-        } else {
-          isBlocked = true;
-          message =
-            'Tu acceso está bloqueado porque no registramos pago con comprobante para este mes. Realizá el pago y subí el comprobante para reactivar el campus.';
-        }
-      } else if (payment.status === 'paid') {
-        // MP pagado pero sin comprobante
-        if (day <= 7) {
-          isBlocked = false;
-          message =
-            'Pago recibido. Subí el comprobante para completar el proceso y asegurar tu acceso al campus.';
-        } else {
-          isBlocked = true;
-          message =
-            'Tu pago por MP está registrado, pero falta subir el comprobante. Subilo para reactivar tu acceso.';
-        }
-      } else {
-        // Otros estados raros
-        isBlocked = day > 7;
-        message =
-          'No se pudo determinar correctamente tu estado de pago. Si ves algo raro, contactá a administración.';
-      }
-    }
-
-    return res.json({
-      student_id,
-      billing_month: billingMonthISO,
-      status,
-      isBlocked,
-      message
-    });
-  } catch (err) {
-    console.error('Error en status:', err);
-    return res.status(500).json({ error: 'Error interno al obtener estado' });
-  }
-});
-
-// ============================
-// LISTADO PARA ADMIN (COMPROBANTES)
-// ============================
-//
-// GET /api/admin/receipts?month=YYYY-MM
-//
-app.get('/api/admin/receipts', async (req, res) => {
-  try {
-    const { month } = req.query;
-
-    if (!month) {
-      return res.status(400).json({ error: 'month (YYYY-MM) es requerido' });
-    }
-
-    const billingMonthDate = parseBillingMonth(month);
-    const billingMonthISO = toISODate(billingMonthDate);
+    const couponCode = String(code).trim().toLowerCase();
 
     const { data, error } = await supabase
-      .from('payments')
-      .select('*')
-      .eq('billing_month', billingMonthISO)
-      .not('receipt_url', 'is', null)
-      .order('updated_at', { ascending: false });
+      .from("coupons")
+      .select("id, code, discount_percent, active, valid_from, valid_to, max_uses, used_count")
+      .eq("code", couponCode)
+      .limit(1)
+      .maybeSingle();
 
     if (error) {
-      console.error('Error listando comprobantes:', error);
-      return res.status(500).json({ error: 'Error listando comprobantes' });
+      console.error("Error consultando cupón:", error);
+      return res.status(500).json({
+        ok: false,
+        msg: "Error interno al validar el cupón.",
+      });
     }
 
-    return res.json({ data });
+    if (!data) {
+      return res.json({
+        ok: false,
+        msg: "Cupón no encontrado.",
+      });
+    }
+
+    if (!data.active) {
+      return res.json({
+        ok: false,
+        msg: "El cupón no está activo.",
+      });
+    }
+
+    const today = new Date();
+
+    if (data.valid_from && new Date(data.valid_from) > today) {
+      return res.json({
+        ok: false,
+        msg: "Este cupón todavía no está vigente.",
+      });
+    }
+
+    if (data.valid_to && new Date(data.valid_to) < today) {
+      return res.json({
+        ok: false,
+        msg: "Este cupón ya venció.",
+      });
+    }
+
+    if (data.max_uses && data.used_count >= data.max_uses) {
+      return res.json({
+        ok: false,
+        msg: "Este cupón ya alcanzó el máximo de usos.",
+      });
+    }
+
+    // (Opcional) Podrías chequear si el alumno ya usó el cupón antes,
+    // con una tabla coupon_redemptions. Para simplificar, no lo hago acá.
+
+    return res.json({
+      ok: true,
+      discount_percent: data.discount_percent || 0,
+    });
   } catch (err) {
-    console.error('Error en /admin/receipts:', err);
-    return res.status(500).json({ error: 'Error interno' });
+    console.error("Error en /coupon/apply:", err);
+    return res.status(500).json({
+      ok: false,
+      msg: "Error interno al validar el cupón.",
+    });
   }
 });
 
-// ============================
-// START
-// ============================
-app.get('/', (req, res) => {
-  res.send('Campus PauPau backend running');
-});
+/* ============================================================
+   3) ENDPOINT SUBIR COMPROBANTE: /payments/upload-receipt
+   - Recibe multipart/form-data:
+       file     => archivo
+       user_id  => uuid del alumno
+       month    => "YYYY-MM"
+   - Sube archivo a Storage (bucket: payments_receipts)
+   - Guarda registro en tabla payment_receipts
+   - NO cambia el estado de payments (eso lo hace el front
+     cuando inserta status = 'approved_full')
+============================================================ */
+app.post(
+  "/payments/upload-receipt",
+  upload.single("file"),
+  async (req, res) => {
+    try {
+      const file = req.file;
+      const { user_id, month } = req.body || {};
 
+      if (!file) {
+        return res.status(400).json({
+          ok: false,
+          msg: "No se recibió archivo.",
+        });
+      }
+
+      if (!user_id || !month) {
+        return res.status(400).json({
+          ok: false,
+          msg: "Faltan user_id o month.",
+        });
+      }
+
+      const bucket = "payments_receipts";
+      const safeName = file.originalname.replace(/[^a-zA-Z0-9_.-]/g, "_");
+      const path = `${user_id}/${month}/${Date.now()}_${safeName}`;
+
+      // Subir a Supabase Storage
+      const { error: uploadErr } = await supabase.storage
+        .from(bucket)
+        .upload(path, file.buffer, {
+          contentType: file.mimetype,
+          upsert: false,
+        });
+
+      if (uploadErr) {
+        console.error("Error subiendo comprobante a Storage:", uploadErr);
+        return res.status(500).json({
+          ok: false,
+          msg: "Error al guardar el comprobante.",
+        });
+      }
+
+      const { data: pub } = supabase.storage.from(bucket).getPublicUrl(path);
+      const publicUrl = pub?.publicUrl || null;
+
+      // Registrar en tabla payment_receipts
+      const { error: insertErr } = await supabase
+        .from("payment_receipts")
+        .insert({
+          user_id,
+          month_year: month,
+          file_url: publicUrl,
+        });
+
+      if (insertErr) {
+        console.error("Error insertando en payment_receipts:", insertErr);
+        // No corto la respuesta, porque el archivo ya está subido.
+      }
+
+      return res.json({
+        ok: true,
+        url: publicUrl,
+      });
+    } catch (err) {
+      console.error("Error en /payments/upload-receipt:", err);
+      return res.status(500).json({
+        ok: false,
+        msg: "Error al subir el comprobante.",
+      });
+    }
+  }
+);
+
+// === PUERTO ===
+const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
+  console.log("PauPau backend escuchando en puerto", PORT);
 });
