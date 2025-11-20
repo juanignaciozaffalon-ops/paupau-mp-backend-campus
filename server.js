@@ -90,30 +90,58 @@ app.post("/coupon/apply", async (req, res) => {
 // ============================
 app.post("/crear-preferencia", async (req, res) => {
   try {
-    const { title, price, metadata } = req.body;
+    const {
+      title,
+      price,
+      currency,
+      back_urls,
+      metadata,
+    } = req.body || {};
 
-    const mpBody = {
+    if (!price || !title) {
+      return res.status(400).json({ ok: false, msg: "Falta título o precio" });
+    }
+
+    // URL del campus (desde ENV)
+    const FRONTEND_URL = process.env.FRONTEND_URL || "https://famous-lily-8e39ce.netlify.app";
+
+    // Si el frontend manda back_urls, las usamos.
+    // Si no, usamos siempre el campus como retorno.
+    const finalBackUrls = back_urls && back_urls.success
+      ? back_urls
+      : {
+          success: FRONTEND_URL,
+          failure: FRONTEND_URL,
+          pending: FRONTEND_URL,
+        };
+
+    const preference = {
       items: [
         {
-          title,
-          unit_price: Number(price),
+          title: title,
           quantity: 1,
+          unit_price: Number(price),
+          currency_id: currency || "ARS",
         },
       ],
-      back_urls: {
-        success: FRONTEND_URL,
-        pending: FRONTEND_URL,
-        failure: FRONTEND_URL,
-      },
-      metadata,
+      back_urls: finalBackUrls,
       auto_return: "approved",
+      metadata: metadata || {},
     };
 
-    const preference = await mercadopago.preferences.create(mpBody);
-    res.json({ ok: true, init_point: preference.body.init_point });
+    const result = await mp.preferences.create(preference);
+
+    return res.json({
+      ok: true,
+      init_point: result.body.init_point,
+      sandbox_init_point: result.body.sandbox_init_point,
+    });
   } catch (err) {
-    console.error("❌ Error creando preferencia:", err);
-    res.json({ ok: false, msg: "Error iniciando pago" });
+    console.error("Error creando preferencia MP:", err);
+    return res.status(500).json({
+      ok: false,
+      msg: "Error creando preferencia",
+    });
   }
 });
 
