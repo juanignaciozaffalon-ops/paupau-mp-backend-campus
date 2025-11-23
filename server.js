@@ -1,6 +1,6 @@
 /* ============================================
    SERVER.JS FINAL — PAUPAU CAMPUS BACKEND
-   Cupón + MP + comprobantes OK
+   Cupón + MP + comprobantes + upsert pagos
    ============================================ */
 
 import express from "express";
@@ -188,9 +188,9 @@ app.post("/crear-preferencia", async (req, res) => {
   }
 });
 
-// ============================
-// RECIBO — SUBIR COMPROBANTE
-// ============================
+// =====================================================
+// RECIBO — SUBIR COMPROBANTE (usa UPSERT en payments)
+// =====================================================
 const upload = multer({ storage: multer.memoryStorage() });
 
 app.post(
@@ -202,16 +202,18 @@ app.post(
       const file = req.file;
 
       if (!user_id || !month) {
-        return res.json({ ok: false, msg: "Faltan datos de usuario/mes" });
+        return res.json({ ok: false, msg: "Faltan user_id o month." });
       }
 
       if (!file) {
         return res.json({ ok: false, msg: "No se envió archivo" });
       }
 
+      // Nombre de archivo seguro
       const safeName = file.originalname.replace(/[^a-zA-Z0-9_.-]/g, "_");
       const path = `receipts/${user_id}/${month}_${Date.now()}_${safeName}`;
 
+      // 1) Subir archivo al bucket payment_receipts
       const { error: uploadErr } = await supabase.storage
         .from("payment_receipts")
         .upload(path, file.buffer, {
@@ -220,68 +222,89 @@ app.post(
         });
 
       if (uploadErr) {
-        console.error("Error subiendo recibo:", uploadErr);
-        return res.json({ ok: false, msg: "No se pudo subir archivo" });
-      }
-
-      const {
-        data: { publicUrl },
-      } = supabase.storage.from("payment_receipts").getPublicUrl(path);
-
-      // Registramos estado intermedio: comprobante cargado
-      const { error: insertErr } = await supabase.from("payments").insert({
-        user_id,
-        month_year: month,
-        status: "receipt_uploaded",
-        receipt_url: publicUrl,
-        amount: 0,
-      });
-
-      if (insertErr) {
-        console.error("Error registrando pago/recibo:", insertErr);
+        console.error("Error subiendo a Storage:", uploadErr);
         return res.json({
           ok: false,
-          msg: "Recibo subido pero no se pudo registrar el pago",
+          msg: "No se pudo subir el archivo al Storage.",
         });
       }
 
-      res.json({ ok: true });
+      // 2) Obtener URL pública
+      const { data: pubData } = supabase
+        .storage
+        .from("payment_receipts")
+        .getPublicUrl(path);
+
+      const publicUrl = pubData?.publicUrl || null;
+
+      // 3) Registrar/actualizar el pago de ese mes para ese alumno
+      //    Usamos UPSERT para NO chocar con el índice único (user_id, month_year)
+      const { error: payErr } = await supabase
+        .from("payments")
+        .upsert(
+          {
+            user_id,
+            month_year: month,          // ej: "2025-11"
+            status: "receipt_uploaded", // estado después de subir comprobante
+            receipt_url: publicUrl,
+            amount: 0,
+          },
+          {
+            onConflict: "user_id,month_year",
+          }
+        );
+
+      if (payErr) {
+        console.error("Error guardando pago:", payErr);
+        return res.json({
+          ok: false,
+          msg: "Recibo subido pero no se pudo registrar el pago en la tabla.",
+        });
+      }
+
+      return res.json({ ok: true, url: publicUrl });
     } catch (err) {
       console.error("Error /payments/upload-receipt:", err);
-      res.json({ ok: false, msg: "Error interno" });
+      return res.json({ ok: false, msg: "Error interno" });
     }
   }
 );
 
-// ============================
-// ADMIN — Cambiar estado de pago manualmente
-// ============================
+// =====================================================
+// ADMIN — Cambiar estado de pago manualmente (UPSERT)
+// =====================================================
 app.post("/admin/payment/set", async (req, res) => {
   try {
-    const { user_id, status } = req.body || {};
+    const { user_id, status, month } = req.body || {};
 
     if (!user_id || !status) {
-      return res.json({ ok: false, msg: "Faltan datos" });
+      return res.json({ ok: false, msg: "Faltan user_id o status." });
     }
 
-    const month = new Date().toISOString().slice(0, 7);
+    const monthYear = month || new Date().toISOString().slice(0, 7); // "YYYY-MM"
 
-    const { error } = await supabase.from("payments").insert({
-      user_id,
-      month_year: month,
-      status,
-      amount: 0,
-    });
+    const { error } = await supabase
+      .from("payments")
+      .upsert(
+        {
+          user_id,
+          month_year: monthYear,
+          status, // "approved" o "pending"
+        },
+        {
+          onConflict: "user_id,month_year",
+        }
+      );
 
     if (error) {
       console.error("Error admin/payment/set:", error);
-      return res.json({ ok: false, msg: "Error actualizando pago" });
+      return res.json({ ok: false, msg: "Error actualizando estado de pago." });
     }
 
-    res.json({ ok: true });
+    return res.json({ ok: true });
   } catch (err) {
     console.error("Error general /admin/payment/set:", err);
-    res.json({ ok: false, msg: "Error interno" });
+    return res.json({ ok: false, msg: "Error interno" });
   }
 });
 
