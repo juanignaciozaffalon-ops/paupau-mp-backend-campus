@@ -32,35 +32,38 @@ app.use(
         return callback(new Error("CORS error: origin not allowed"));
       } catch (e) {
         console.error("CORS parse error:", e);
-        return callback(new Error("CORS error"));
+        return callback(new Error("CORS error: bad config"));
       }
     },
   })
 );
 
 // ============================
-// ENV VALIDATION
+// ENV & SUPABASE
 // ============================
-const SUPABASE_URL = process.env.SUPABASE_URL;
-const SUPABASE_SERVICE_ROLE = process.env.SUPABASE_SERVICE_ROLE;
-const MP_ACCESS_TOKEN = process.env.MP_ACCESS_TOKEN;
-const FRONTEND_URL =
-  process.env.FRONTEND_URL || "https://famous-lily-8e39ce.netlify.app";
+const {
+  SUPABASE_URL,
+  SUPABASE_SERVICE_ROLE_KEY,
+  MP_ACCESS_TOKEN,
+  PORT,
+} = process.env;
 
-if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE) {
-  console.error("❌ ERROR: SUPABASE_URL o SUPABASE_SERVICE_ROLE faltan en ENV");
+if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
+  console.error("❌ Faltan SUPABASE_URL o SUPABASE_SERVICE_ROLE_KEY en .env");
   process.exit(1);
 }
 
 if (!MP_ACCESS_TOKEN) {
-  console.error("❌ ERROR: MP_ACCESS_TOKEN faltando en ENV");
-  process.exit(1);
+  console.warn("⚠️ No hay MP_ACCESS_TOKEN; las rutas de MP no funcionarán.");
 }
 
+const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+
 // ============================
-// SUPABASE CLIENT (service role)
+// MULTER (para comprobantes)
 // ============================
-const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE);
+const storage = multer.memoryStorage();
+const upload = multer({ storage });
 
 // ============================
 // MERCADO PAGO CONFIG
@@ -78,121 +81,139 @@ app.get("/health", (req, res) => {
 
 // ============================
 // CUPÓN — VERIFICAR
-// (más tolerante: ignora tipo de 'active')
 // ============================
+// Body: { code: "nachoprueba" }
 app.post("/coupon/apply", async (req, res) => {
   try {
     const { code } = req.body || {};
-
     if (!code) {
-      return res.json({ ok: false, msg: "Falta código de cupón" });
+      return res.status(400).json({ ok: false, msg: "Falta código de cupón" });
     }
 
-    const normalizedCode = String(code).trim().toLowerCase();
+    const now = new Date().toISOString();
 
     const { data, error } = await supabase
       .from("coupons")
-      .select("code, discount_percent, active")
-      .eq("code", normalizedCode);
+      .select("*")
+      .eq("code", code)
+      .eq("active", true)
+      .lte("valid_from", now)
+      .gte("valid_to", now)
+      .limit(1)
+      .single();
 
     if (error) {
-      console.error("Error consultando coupons:", error);
-      return res.json({
-        ok: false,
-        msg: "Error al validar el cupón",
-      });
+      console.error("Error buscando cupón:", error);
+      return res
+        .status(500)
+        .json({ ok: false, msg: "Error interno al buscar cupón" });
     }
 
-    if (!data || data.length === 0) {
-      return res.json({
-        ok: false,
-        msg: "Cupón inválido o inactivo",
-      });
+    if (!data) {
+      return res.json({ ok: false, msg: "Cupón no válido o inactivo" });
     }
 
-    const coupon = data[0];
-
-    // Si existe columna active y está explícitamente en false -> inválido
-    if (coupon.active === false) {
-      return res.json({
-        ok: false,
-        msg: "Cupón inválido o inactivo",
-      });
-    }
-
-    const discountPercent = Number(coupon.discount_percent || 0);
-
+    // data.discount_percent es numeric en la tabla
     return res.json({
       ok: true,
-      discount_percent: discountPercent,
+      discount_percent: data.discount_percent || 0,
+      coupon: data,
     });
-  } catch (e) {
-    console.error("Error general /coupon/apply:", e);
-    return res.json({
-      ok: false,
-      msg: "Error interno al validar el cupón",
-    });
+  } catch (err) {
+    console.error("Error /coupon/apply:", err);
+    return res.status(500).json({ ok: false, msg: "Error interno" });
   }
 });
 
 // ============================
-// MERCADO PAGO – CREAR PREFERENCIA
+// MERCADO PAGO — CREAR PREFERENCIA
 // ============================
-app.post("/crear-preferencia", async (req, res) => {
+// Body: { title, quantity, unit_price, back_url_success, back_url_failure, coupon_code? }
+app.post("/mp/create-preference", async (req, res) => {
   try {
-    const { title, price, currency, back_urls, metadata } = req.body || {};
+    const {
+      title,
+      quantity,
+      unit_price,
+      back_url_success,
+      back_url_failure,
+      coupon_code,
+    } = req.body || {};
 
-    if (!price || !title) {
+    if (!title || !quantity || !unit_price) {
       return res
         .status(400)
-        .json({ ok: false, msg: "Falta título o precio para la preferencia" });
+        .json({ ok: false, msg: "Faltan campos en la preferencia" });
     }
 
-    // Si el frontend NO manda back_urls, usamos siempre el campus como retorno.
-    const finalBackUrls =
-      back_urls && back_urls.success
-        ? back_urls
-        : {
-            success: FRONTEND_URL,
-            failure: FRONTEND_URL,
-            pending: FRONTEND_URL,
-          };
+    let finalAmount = unit_price * quantity;
+    let discountPercent = 0;
+    let couponData = null;
+
+    if (coupon_code) {
+      const now = new Date().toISOString();
+      const { data: coupon, error: couponErr } = await supabase
+        .from("coupons")
+        .select("*")
+        .eq("code", coupon_code)
+        .eq("active", true)
+        .lte("valid_from", now)
+        .gte("valid_to", now)
+        .limit(1)
+        .single();
+
+      if (couponErr) {
+        console.error("Error consultando cupón para preferencia:", couponErr);
+      } else if (coupon) {
+        discountPercent = coupon.discount_percent || 0;
+        couponData = coupon;
+        finalAmount = finalAmount * (1 - discountPercent / 100);
+      }
+    }
 
     const preference = {
       items: [
         {
           title,
-          quantity: 1,
-          unit_price: Number(price),
-          currency_id: currency || "ARS",
+          quantity,
+          unit_price: Number(finalAmount.toFixed(2)),
+          currency_id: "ARS",
         },
       ],
-      back_urls: finalBackUrls,
+      back_urls: {
+        success: back_url_success || "https://paupaulanguages.com",
+        failure: back_url_failure || "https://paupaulanguages.com",
+      },
       auto_return: "approved",
-      metadata: metadata || {},
     };
 
     const result = await mercadopago.preferences.create(preference);
 
+    // Guardar algo en payments si querés (mp_preference_id, amount, etc.)
+    // No obligatorio para esta versión del flujo "simple".
+
     return res.json({
       ok: true,
+      id: result.body.id,
       init_point: result.body.init_point,
       sandbox_init_point: result.body.sandbox_init_point,
+      final_amount: finalAmount,
+      discount_percent: discountPercent,
+      coupon: couponData,
     });
   } catch (err) {
-    console.error("Error creando preferencia MP:", err);
-    return res.status(500).json({
-      ok: false,
-      msg: "Error creando preferencia",
-    });
+    console.error("Error /mp/create-preference:", err);
+    return res.status(500).json({ ok: false, msg: "Error interno" });
   }
 });
 
 // =====================================================
-// RECIBO — SUBIR COMPROBANTE (usa UPSERT en payments)
+// PAGOS — SUBIR COMPROBANTE Y REGISTRAR PAGO EN TABLA
 // =====================================================
-const upload = multer({ storage: multer.memoryStorage() });
-
+// Body (form-data):
+// - file: (archivo)
+// - user_id: uuid del alumno
+// - month: "YYYY-MM" (ej: "2025-11")
 app.post(
   "/payments/upload-receipt",
   upload.single("file"),
@@ -202,57 +223,62 @@ app.post(
       const file = req.file;
 
       if (!user_id || !month) {
-        return res.json({ ok: false, msg: "Faltan user_id o month." });
+        return res.json({
+          ok: false,
+          msg: "Faltan user_id o month en el formulario.",
+        });
       }
 
       if (!file) {
-        return res.json({ ok: false, msg: "No se envió archivo" });
+        return res.json({
+          ok: false,
+          msg: "No se recibió archivo para el comprobante.",
+        });
       }
 
-      // Nombre de archivo seguro
-      const safeName = file.originalname.replace(/[^a-zA-Z0-9_.-]/g, "_");
-      const path = `receipts/${user_id}/${month}_${Date.now()}_${safeName}`;
+      // 1) Subir archivo a Supabase Storage
+      const fileExt = file.originalname.split(".").pop();
+      const fileName = `${user_id}/${month}-${Date.now()}.${fileExt}`;
+      const bucket = "payment_receipts";
 
-      // 1) Subir archivo al bucket payment_receipts
-      const { error: uploadErr } = await supabase.storage
-        .from("payment_receipts")
-        .upload(path, file.buffer, {
+      const { error: uploadError } = await supabase.storage
+        .from(bucket)
+        .upload(fileName, file.buffer, {
           contentType: file.mimetype,
           upsert: true,
         });
 
-      if (uploadErr) {
-        console.error("Error subiendo a Storage:", uploadErr);
+      if (uploadError) {
+        console.error("Error subiendo archivo Storage:", uploadError);
         return res.json({
           ok: false,
-          msg: "No se pudo subir el archivo al Storage.",
+          msg: "No se pudo subir el archivo de comprobante.",
         });
       }
 
-      // 2) Obtener URL pública
-      const { data: pubData } = supabase
-        .storage
-        .from("payment_receipts")
-        .getPublicUrl(path);
+      // 2) Obtener la URL pública
+      const { data: publicData } = supabase.storage
+        .from(bucket)
+        .getPublicUrl(fileName);
 
-      const publicUrl = pubData?.publicUrl || null;
+      const publicUrl = publicData?.publicUrl || null;
 
-      // 3) Registrar/actualizar el pago de ese mes para ese alumno
-      //    Usamos UPSERT para NO chocar con el índice único (user_id, month_year)
-      const { error: payErr } = await supabase
-        .from("payments")
-        .upsert(
-          {
-            user_id,
-            month_year: month,          // ej: "2025-11"
-            status: "receipt_uploaded", // estado después de subir comprobante
-            receipt_url: publicUrl,
-            amount: 0,
-          },
-          {
-            onConflict: "user_id,month_year",
-          }
-        );
+      // 3) Upsert en la tabla payments (user_id + month_year único)
+      const monthYear = month; // "YYYY-MM", ya viene así
+      const { error: payErr } = await supabase.from("payments").upsert(
+        {
+          user_id,
+          month_year: monthYear,
+          status: "receipt_uploaded",
+          receipt_url: publicUrl,
+          amount: 0,
+          receipt_uploaded_at: new Date().toISOString(),
+          source: "receipt_upload",
+        },
+        {
+          onConflict: "user_id,month_year",
+        }
+      );
 
       if (payErr) {
         console.error("Error guardando pago:", payErr);
@@ -269,6 +295,77 @@ app.post(
     }
   }
 );
+
+// =====================================================
+// ADMIN — OBTENER PAGOS DE UN ALUMNO (COMPROBANTES)
+// =====================================================
+// Query: ?user_id=...&month=YYYY-MM (mes opcional)
+app.get("/admin/payments/user", async (req, res) => {
+  try {
+    const { user_id, month } = req.query || {};
+    if (!user_id) {
+      return res.json({ ok: false, msg: "Falta user_id" });
+    }
+
+    let query = supabase.from("payments").select("*").eq("user_id", user_id);
+
+    if (month) {
+      query = query.eq("month_year", month);
+    }
+
+    const { data, error } = await query.order("month_year", {
+      ascending: false,
+    });
+
+    if (error) {
+      console.error("Error admin/payments/user:", error);
+      return res.json({ ok: false, msg: "Error consultando pagos" });
+    }
+
+    return res.json({ ok: true, payments: data || [] });
+  } catch (err) {
+    console.error("Error general /admin/payments/user:", err);
+    return res.json({ ok: false, msg: "Error interno" });
+  }
+});
+
+// =====================================================
+// ADMIN — RESUMEN PAGOS MES ACTUAL
+// =====================================================
+// Query: ?month=YYYY-MM
+app.get("/admin/payments/summary", async (req, res) => {
+  try {
+    const { month } = req.query || {};
+    const monthYear = month || new Date().toISOString().slice(0, 7);
+
+    // Join con profiles para traer nombre del alumno
+    const { data, error } = await supabase
+      .from("payments")
+      .select(
+        `
+        id,
+        user_id,
+        month_year,
+        status,
+        updated_at,
+        receipt_url,
+        profiles:first_name,
+        profiles:last_name
+      `
+      )
+      .eq("month_year", monthYear);
+
+    if (error) {
+      console.error("Error admin/payments/summary:", error);
+      return res.json({ ok: false, msg: "Error consultando resumen" });
+    }
+
+    return res.json({ ok: true, payments: data || [] });
+  } catch (err) {
+    console.error("Error general /admin/payments/summary:", err);
+    return res.json({ ok: false, msg: "Error interno" });
+  }
+});
 
 // =====================================================
 // ADMIN — Cambiar estado de pago manualmente (UPSERT)
@@ -311,7 +408,7 @@ app.post("/admin/payment/set", async (req, res) => {
 // ============================
 // START SERVER
 // ============================
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`🚀 Backend PauPau corriendo en puerto ${PORT}`);
+const PORT_TO_USE = PORT || 3000;
+app.listen(PORT_TO_USE, () => {
+  console.log(`🚀 Backend PauPau corriendo en puerto ${PORT_TO_USE}`);
 });
