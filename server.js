@@ -41,15 +41,15 @@ app.use(
 // ============================
 // ENV & SUPABASE
 // ============================
-const {
-  SUPABASE_URL,
-  SUPABASE_SERVICE_ROLE_KEY,
-  MP_ACCESS_TOKEN,
-  PORT,
-} = process.env;
+const SUPABASE_URL = process.env.SUPABASE_URL;
+const SUPABASE_SERVICE_ROLE = process.env.SUPABASE_SERVICE_ROLE;
+const MP_ACCESS_TOKEN = process.env.MP_ACCESS_TOKEN;
+const PORT = process.env.PORT || 3000;
 
-if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
-  console.error("❌ Faltan SUPABASE_URL o SUPABASE_SERVICE_ROLE_KEY en .env");
+if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE) {
+  console.error(
+    "❌ Faltan SUPABASE_URL o SUPABASE_SERVICE_ROLE en variables de entorno"
+  );
   process.exit(1);
 }
 
@@ -57,7 +57,7 @@ if (!MP_ACCESS_TOKEN) {
   console.warn("⚠️ No hay MP_ACCESS_TOKEN; las rutas de MP no funcionarán.");
 }
 
-const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE);
 
 // ============================
 // MULTER (para comprobantes)
@@ -113,7 +113,6 @@ app.post("/coupon/apply", async (req, res) => {
       return res.json({ ok: false, msg: "Cupón no válido o inactivo" });
     }
 
-    // data.discount_percent es numeric en la tabla
     return res.json({
       ok: true,
       discount_percent: data.discount_percent || 0,
@@ -126,10 +125,11 @@ app.post("/coupon/apply", async (req, res) => {
 });
 
 // ============================
-// MERCADO PAGO — CREAR PREFERENCIA
+// MERCADO PAGO – CREAR PREFERENCIA
 // ============================
-// Body: { title, quantity, unit_price, back_url_success, back_url_failure, coupon_code? }
-app.post("/mp/create-preference", async (req, res) => {
+
+// handler reutilizable
+const createPreferenceHandler = async (req, res) => {
   try {
     const {
       title,
@@ -189,9 +189,6 @@ app.post("/mp/create-preference", async (req, res) => {
 
     const result = await mercadopago.preferences.create(preference);
 
-    // Guardar algo en payments si querés (mp_preference_id, amount, etc.)
-    // No obligatorio para esta versión del flujo "simple".
-
     return res.json({
       ok: true,
       id: result.body.id,
@@ -202,10 +199,14 @@ app.post("/mp/create-preference", async (req, res) => {
       coupon: couponData,
     });
   } catch (err) {
-    console.error("Error /mp/create-preference:", err);
+    console.error("Error creando preferencia MP:", err);
     return res.status(500).json({ ok: false, msg: "Error interno" });
   }
-});
+};
+
+// Ruta nueva y ruta vieja (por compatibilidad)
+app.post("/mp/create-preference", createPreferenceHandler);
+app.post("/crear-preferencia", createPreferenceHandler);
 
 // =====================================================
 // PAGOS — SUBIR COMPROBANTE Y REGISTRAR PAGO EN TABLA
@@ -264,7 +265,7 @@ app.post(
       const publicUrl = publicData?.publicUrl || null;
 
       // 3) Upsert en la tabla payments (user_id + month_year único)
-      const monthYear = month; // "YYYY-MM", ya viene así
+      const monthYear = month; // "YYYY-MM"
       const { error: payErr } = await supabase.from("payments").upsert(
         {
           user_id,
@@ -338,22 +339,11 @@ app.get("/admin/payments/summary", async (req, res) => {
     const { month } = req.query || {};
     const monthYear = month || new Date().toISOString().slice(0, 7);
 
-    // Join con profiles para traer nombre del alumno
     const { data, error } = await supabase
       .from("payments")
-      .select(
-        `
-        id,
-        user_id,
-        month_year,
-        status,
-        updated_at,
-        receipt_url,
-        profiles:first_name,
-        profiles:last_name
-      `
-      )
-      .eq("month_year", monthYear);
+      .select("*")
+      .eq("month_year", monthYear)
+      .order("updated_at", { ascending: false });
 
     if (error) {
       console.error("Error admin/payments/summary:", error);
@@ -408,7 +398,6 @@ app.post("/admin/payment/set", async (req, res) => {
 // ============================
 // START SERVER
 // ============================
-const PORT_TO_USE = PORT || 3000;
-app.listen(PORT_TO_USE, () => {
-  console.log(`🚀 Backend PauPau corriendo en puerto ${PORT_TO_USE}`);
+app.listen(PORT, () => {
+  console.log(`🚀 Backend PauPau corriendo en puerto ${PORT}`);
 });
