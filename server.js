@@ -128,7 +128,6 @@ app.post("/coupon/apply", async (req, res) => {
 // MERCADO PAGO – CREAR PREFERENCIA
 // ============================
 
-// handler reutilizable
 const createPreferenceHandler = async (req, res) => {
   try {
     const {
@@ -272,7 +271,7 @@ app.post(
           month_year: monthYear,
           status: "receipt_uploaded",
           receipt_url: publicUrl,
-          amount: 0,
+          amount: 0, // el admin después puede actualizar, pero nunca será NULL
           receipt_uploaded_at: new Date().toISOString(),
           source: "receipt_upload",
         },
@@ -368,8 +367,25 @@ app.post("/admin/payment/set", async (req, res) => {
       return res.json({ ok: false, msg: "Faltan user_id o status." });
     }
 
-    const monthYear = month || new Date().toISOString().slice(0, 7); // "YYYY-MM"
+    const monthYear = month || new Date().toISOString().slice(0, 7); // YYYY-MM
 
+    // 1) Buscar registro existente para recuperar amount
+    const { data: existing, error: fetchError } = await supabase
+      .from("payments")
+      .select("amount")
+      .eq("user_id", user_id)
+      .eq("month_year", monthYear)
+      .maybeSingle();
+
+    if (fetchError) {
+      console.error("Error buscando pago existente:", fetchError);
+      return res.json({ ok: false, msg: "Error buscando pago existente." });
+    }
+
+    // Si existe, usamos el amount de la fila. Si no, usamos 0 como default.
+    const amount = existing?.amount ?? 0;
+
+    // 2) Upsert con amount incluido (no puede ser NULL)
     const { error } = await supabase
       .from("payments")
       .upsert(
@@ -377,6 +393,7 @@ app.post("/admin/payment/set", async (req, res) => {
           user_id,
           month_year: monthYear,
           status, // "approved" o "pending"
+          amount,
         },
         {
           onConflict: "user_id,month_year",
@@ -390,8 +407,8 @@ app.post("/admin/payment/set", async (req, res) => {
 
     return res.json({ ok: true });
   } catch (err) {
-    console.error("Error general /admin/payment/set:", err);
-    return res.json({ ok: false, msg: "Error interno" });
+    console.error("Exception en /admin/payment/set:", err);
+    return res.json({ ok: false, msg: "Error inesperado." });
   }
 });
 
