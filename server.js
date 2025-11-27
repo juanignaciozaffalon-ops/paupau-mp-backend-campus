@@ -854,6 +854,25 @@ app.post("/chat/messages", async (req, res) => {
   }
 });
 
+// =====================================================
+// TEST EMAIL — para probar Nodemailer
+// =====================================================
+app.get("/test-email", async (req, res) => {
+  try {
+    await transporter.sendMail({
+      from: process.env.SMTP_FROM,
+      to: "paupaulanguagesadmi@gmail.com", // tu mail real
+      subject: "Test PauPau Notificaciones",
+      text: "Este es un test de nodemailer funcionando en Render 🚀",
+    });
+
+    return res.json({ ok: true, msg: "Correo enviado" });
+  } catch (err) {
+    console.error("Error test-email:", err);
+    return res.status(500).json({ ok: false, msg: "Error enviando test" });
+  }
+});
+
 // ============================
 // START SERVER
 // ============================
