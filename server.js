@@ -1,6 +1,7 @@
 /* ============================================
    SERVER.JS FINAL — PAUPAU CAMPUS BACKEND
    Cupón + MP + comprobantes + upsert pagos
+   + endpoints admin + facturas + chat
    ============================================ */
 
 import express from "express";
@@ -60,7 +61,7 @@ if (!MP_ACCESS_TOKEN) {
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE);
 
 // ============================
-// MULTER (para comprobantes)
+// MULTER (para comprobantes / facturas)
 // ============================
 const storage = multer.memoryStorage();
 const upload = multer({ storage });
@@ -330,7 +331,7 @@ app.get("/admin/payments/user", async (req, res) => {
 });
 
 // =====================================================
-// ADMIN — RESUMEN PAGOS MES ACTUAL
+// ADMIN — RESUMEN PAGOS MES (CON FILTRO POR MES)
 // =====================================================
 // Query: ?month=YYYY-MM
 app.get("/admin/payments/summary", async (req, res) => {
@@ -409,6 +410,277 @@ app.post("/admin/payment/set", async (req, res) => {
   } catch (err) {
     console.error("Exception en /admin/payment/set:", err);
     return res.json({ ok: false, msg: "Error inesperado." });
+  }
+});
+
+// =====================================================
+// ADMIN — LISTA DE USUARIOS Y PROFES (para panel admin)
+// =====================================================
+
+// Devuelve todos los perfiles (el filtro por texto se hace en el front)
+app.get("/admin/users", async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from("profiles")
+      .select(
+        "id, email, first_name, last_name, role, teacher_id, zoom_link, class_modality, individual_frequency"
+      );
+
+    if (error) {
+      console.error("Error /admin/users:", error);
+      return res.json({ ok: false, msg: "Error cargando usuarios" });
+    }
+
+    return res.json({ ok: true, users: data || [] });
+  } catch (err) {
+    console.error("Error general /admin/users:", err);
+    return res.json({ ok: false, msg: "Error interno" });
+  }
+});
+
+// Devuelve sólo los perfiles con rol=teacher
+app.get("/admin/teachers", async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from("profiles")
+      .select("id, email, first_name, last_name, role")
+      .eq("role", "teacher");
+
+    if (error) {
+      console.error("Error /admin/teachers:", error);
+      return res.json({ ok: false, msg: "Error cargando profesores" });
+    }
+
+    return res.json({ ok: true, teachers: data || [] });
+  } catch (err) {
+    console.error("Error general /admin/teachers:", err);
+    return res.json({ ok: false, msg: "Error interno" });
+  }
+});
+
+// =====================================================
+// FACTURAS — SUBIDA POR ADMIN Y CONSULTA (HISTORIAL)
+// =====================================================
+
+const INVOICES_BUCKET = "payment_invoices"; // bucket que creaste para facturas
+
+// Body (form-data):
+// - file   (archivo factura PDF/JPG/PNG)
+// - user_id
+// - month  = "YYYY-MM"
+// - amount (opcional, número)
+app.post(
+  "/admin/invoices/upload",
+  upload.single("file"),
+  async (req, res) => {
+    try {
+      const { user_id, month, amount } = req.body || {};
+      const file = req.file;
+
+      if (!user_id || !month) {
+        return res.json({
+          ok: false,
+          msg: "Faltan user_id o month en el formulario.",
+        });
+      }
+
+      if (!file) {
+        return res.json({ ok: false, msg: "No se recibió archivo de factura." });
+      }
+
+      const fileExt = file.originalname.split(".").pop();
+      const fileName = `${user_id}/${month}-invoice-${Date.now()}.${fileExt}`;
+
+      const { error: uploadError } = await supabase.storage
+        .from(INVOICES_BUCKET)
+        .upload(fileName, file.buffer, {
+          contentType: file.mimetype,
+          upsert: true,
+        });
+
+      if (uploadError) {
+        console.error("Error subiendo factura Storage:", uploadError);
+        return res.json({
+          ok: false,
+          msg: "No se pudo subir el archivo de factura.",
+        });
+      }
+
+      const { data: publicData } = supabase.storage
+        .from(INVOICES_BUCKET)
+        .getPublicUrl(fileName);
+
+      const publicUrl = publicData?.publicUrl || null;
+      const monthYear = month; // "YYYY-MM"
+
+      const amountNumber =
+        amount != null && amount !== "" ? Number(amount) : null;
+
+      const { error: invErr } = await supabase
+        .from("invoices")
+        .upsert(
+          {
+            user_id,
+            month_year: monthYear,
+            amount: amountNumber,
+            invoice_url: publicUrl,
+            created_at: new Date().toISOString(),
+          },
+          {
+            onConflict: "user_id,month_year",
+          }
+        );
+
+      if (invErr) {
+        console.error("Error guardando factura en tabla invoices:", invErr);
+        return res.json({
+          ok: false,
+          msg: "Factura subida pero no se pudo guardar el registro.",
+        });
+      }
+
+      return res.json({ ok: true, url: publicUrl });
+    } catch (err) {
+      console.error("Error /admin/invoices/upload:", err);
+      return res.json({ ok: false, msg: "Error interno" });
+    }
+  }
+);
+
+// Obtener historial de facturas por usuario (y mes opcional)
+// GET /invoices/user?user_id=...&month=YYYY-MM
+app.get("/invoices/user", async (req, res) => {
+  try {
+    const { user_id, month } = req.query || {};
+    if (!user_id) {
+      return res.json({ ok: false, msg: "Falta user_id" });
+    }
+
+    let query = supabase.from("invoices").select("*").eq("user_id", user_id);
+
+    if (month) {
+      query = query.eq("month_year", month);
+    }
+
+    const { data, error } = await query.order("created_at", {
+      ascending: false,
+    });
+
+    if (error) {
+      console.error("Error /invoices/user:", error);
+      return res.json({
+        ok: false,
+        msg: "Error consultando facturas del usuario",
+      });
+    }
+
+    return res.json({ ok: true, invoices: data || [] });
+  } catch (err) {
+    console.error("Error general /invoices/user:", err);
+    return res.json({ ok: false, msg: "Error interno" });
+  }
+});
+
+// Resumen de facturas por mes (para admin)
+// GET /admin/invoices/summary?month=YYYY-MM
+app.get("/admin/invoices/summary", async (req, res) => {
+  try {
+    const { month } = req.query || {};
+    const monthYear = month || new Date().toISOString().slice(0, 7);
+
+    const { data, error } = await supabase
+      .from("invoices")
+      .select("*")
+      .eq("month_year", monthYear)
+      .order("created_at", { ascending: false });
+
+    if (error) {
+      console.error("Error /admin/invoices/summary:", error);
+      return res.json({
+        ok: false,
+        msg: "Error consultando facturas del mes",
+      });
+    }
+
+    return res.json({ ok: true, invoices: data || [] });
+  } catch (err) {
+    console.error("Error general /admin/invoices/summary:", err);
+    return res.json({ ok: false, msg: "Error interno" });
+  }
+});
+
+// =====================================================
+// CHAT — ENDPOINTS (por si los querés usar desde otros clientes)
+// =====================================================
+
+// GET /chat/messages?room=room_...&since=ISO_OPCIONAL
+app.get("/chat/messages", async (req, res) => {
+  try {
+    const { room, since } = req.query || {};
+    if (!room) {
+      return res.json({ ok: false, msg: "Falta room" });
+    }
+
+    let query = supabase
+      .from("messages")
+      .select("*")
+      .eq("room", room)
+      .order("created_at", { ascending: true });
+
+    if (since) {
+      query = query.gt("created_at", since);
+    }
+
+    const { data, error } = await query;
+
+    if (error) {
+      console.error("Error /chat/messages:", error);
+      return res.json({
+        ok: false,
+        msg: "Error consultando mensajes de chat",
+      });
+    }
+
+    return res.json({ ok: true, messages: data || [] });
+  } catch (err) {
+    console.error("Error general /chat/messages:", err);
+    return res.json({ ok: false, msg: "Error interno" });
+  }
+});
+
+// POST /chat/messages  Body: { room, sender_id, content }
+app.post("/chat/messages", async (req, res) => {
+  try {
+    const { room, sender_id, content } = req.body || {};
+    if (!room || !sender_id || !content) {
+      return res.json({
+        ok: false,
+        msg: "Faltan room, sender_id o content",
+      });
+    }
+
+    const { data, error } = await supabase
+      .from("messages")
+      .insert({
+        room,
+        sender_id,
+        content,
+      })
+      .select()
+      .single();
+
+    if (error) {
+      console.error("Error insertando mensaje de chat:", error);
+      return res.json({
+        ok: false,
+        msg: "No se pudo guardar el mensaje",
+      });
+    }
+
+    return res.json({ ok: true, message: data });
+  } catch (err) {
+    console.error("Error general POST /chat/messages:", err);
+    return res.json({ ok: false, msg: "Error interno" });
   }
 });
 
