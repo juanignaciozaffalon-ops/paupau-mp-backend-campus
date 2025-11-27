@@ -2,6 +2,7 @@
    SERVER.JS FINAL — PAUPAU CAMPUS BACKEND
    Cupón + MP + comprobantes + upsert pagos
    + endpoints admin + facturas + chat
+   + notificaciones (emails + BD)
    ============================================ */
 
 import express from "express";
@@ -10,6 +11,7 @@ import cors from "cors";
 import dotenv from "dotenv";
 import { createClient } from "@supabase/supabase-js";
 import mercadopago from "mercadopago";
+import nodemailer from "nodemailer";
 
 dotenv.config();
 const app = express();
@@ -72,6 +74,108 @@ const upload = multer({ storage });
 mercadopago.configure({
   access_token: MP_ACCESS_TOKEN,
 });
+
+// ============================
+// EMAIL (Nodemailer)
+// ============================
+const SMTP_HOST = process.env.SMTP_HOST;
+const SMTP_PORT = Number(process.env.SMTP_PORT || "587");
+const SMTP_USER = process.env.SMTP_USER;
+const SMTP_PASS = process.env.SMTP_PASS;
+const SMTP_FROM =
+  process.env.SMTP_FROM || "PauPau Campus <no-reply@paupaulanguages.com>";
+
+let mailer = null;
+
+if (SMTP_HOST && SMTP_USER && SMTP_PASS) {
+  mailer = nodemailer.createTransport({
+    host: SMTP_HOST,
+    port: SMTP_PORT,
+    secure: SMTP_PORT === 465, // true para 465, false para 587/25
+    auth: {
+      user: SMTP_USER,
+      pass: SMTP_PASS,
+    },
+  });
+} else {
+  console.warn(
+    "⚠️ SMTP no configurado (SMTP_HOST/SMTP_USER/SMTP_PASS). No se enviarán correos."
+  );
+}
+
+async function sendNotificationEmail(to, subject, text) {
+  if (!mailer) return;
+  try {
+    await mailer.sendMail({
+      from: SMTP_FROM,
+      to,
+      subject,
+      text,
+    });
+  } catch (err) {
+    console.error("Error enviando correo de notificación:", err);
+  }
+}
+
+// ============================
+// NOTIFICATIONS HELPER
+// ============================
+async function createNotification({
+  userId,
+  type,
+  title,
+  body,
+  refTable,
+  refId,
+  sendEmail,
+}) {
+  if (!userId || !type) return;
+
+  // 1) Crear registro en tabla notifications
+  const { data: notif, error } = await supabase
+    .from("notifications")
+    .insert({
+      user_id: userId,
+      type,
+      title: title || null,
+      body: body || null,
+      ref_table: refTable || null,
+      ref_id: refId || null,
+    })
+    .select("id")
+    .single();
+
+  if (error) {
+    console.error("Error creando notificación:", error);
+    return;
+  }
+
+  // 2) Enviar correo (opcional)
+  if (sendEmail) {
+    const { data: prof, error: profErr } = await supabase
+      .from("profiles")
+      .select("email, first_name")
+      .eq("id", userId)
+      .maybeSingle();
+
+    if (profErr) {
+      console.error("Error buscando email para notificación:", profErr);
+      return;
+    }
+
+    const to = prof?.email;
+    if (!to) return;
+
+    const subject = title || "Nueva notificación en el Campus PauPau";
+    const text =
+      (body || "") +
+      "\n\nIngresá al campus para ver más detalles: https://campus.paupaulanguages.com";
+
+    await sendNotificationEmail(to, subject, text);
+  }
+
+  return notif;
+}
 
 // ============================
 // HEALTHCHECK
@@ -406,6 +510,23 @@ app.post("/admin/payment/set", async (req, res) => {
       return res.json({ ok: false, msg: "Error actualizando estado de pago." });
     }
 
+    // 🔔 Notificación de estado de pago
+    try {
+      const title = "Actualización de estado de pago";
+      const body = `Tu estado de pago para ${monthYear} ahora es: ${status}.`;
+      await createNotification({
+        userId: user_id,
+        type: "payment_status",
+        title,
+        body,
+        refTable: "payments",
+        refId: `${user_id}:${monthYear}`,
+        sendEmail: true,
+      });
+    } catch (e) {
+      console.error("Error creando notificación de pago:", e);
+    }
+
     return res.json({ ok: true });
   } catch (err) {
     console.error("Exception en /admin/payment/set:", err);
@@ -462,7 +583,7 @@ app.get("/admin/teachers", async (req, res) => {
 // FACTURAS — SUBIDA POR ADMIN Y CONSULTA (HISTORIAL)
 // =====================================================
 
-const INVOICES_BUCKET = "invoices"; // bucket que creaste para facturas
+const INVOICES_BUCKET = "invoices"; // nombre del bucket en Supabase
 
 // Body (form-data):
 // - file   (archivo factura PDF/JPG/PNG)
@@ -523,11 +644,11 @@ app.post(
             user_id,
             month_year: monthYear,
             amount: amountNumber,
-            invoice_url: publicUrl,
+            file_url: publicUrl,
             created_at: new Date().toISOString(),
           },
           {
-            onConflict: "user_id,month_year",
+            onConflict: "invoices_user_month_key",
           }
         );
 
@@ -537,6 +658,23 @@ app.post(
           ok: false,
           msg: "Factura subida pero no se pudo guardar el registro.",
         });
+      }
+
+      // 🔔 Notificación de factura
+      try {
+        const title = "Nueva factura disponible";
+        const body = `Se cargó una nueva factura para el mes ${monthYear}.`;
+        await createNotification({
+          userId: user_id,
+          type: "invoice",
+          title,
+          body,
+          refTable: "invoices",
+          refId: `${user_id}:${monthYear}`,
+          sendEmail: true,
+        });
+      } catch (e) {
+        console.error("Error creando notificación de factura:", e);
       }
 
       return res.json({ ok: true, url: publicUrl });
@@ -680,6 +818,69 @@ app.post("/chat/messages", async (req, res) => {
     return res.json({ ok: true, message: data });
   } catch (err) {
     console.error("Error general POST /chat/messages:", err);
+    return res.json({ ok: false, msg: "Error interno" });
+  }
+});
+
+// =====================================================
+// NOTIFICATIONS API (para el frontend)
+// =====================================================
+
+// GET /notifications/unread?user_id=...
+app.get("/notifications/unread", async (req, res) => {
+  try {
+    const { user_id } = req.query || {};
+    if (!user_id) {
+      return res.json({ ok: false, msg: "Falta user_id" });
+    }
+
+    const { data, error } = await supabase
+      .from("notifications")
+      .select("type, count:id")
+      .eq("user_id", user_id)
+      .is("read_at", null)
+      .group("type");
+
+    if (error) {
+      console.error("Error /notifications/unread:", error);
+      return res.json({ ok: false, msg: "Error consultando notificaciones" });
+    }
+
+    const counts = {};
+    (data || []).forEach((row) => {
+      counts[row.type] = Number(row.count) || 0;
+    });
+
+    return res.json({ ok: true, counts });
+  } catch (err) {
+    console.error("Error general /notifications/unread:", err);
+    return res.json({ ok: false, msg: "Error interno" });
+  }
+});
+
+// POST /notifications/mark-read  Body: { user_id, type }
+app.post("/notifications/mark-read", async (req, res) => {
+  try {
+    const { user_id, type } = req.body || {};
+    if (!user_id || !type) {
+      return res.json({ ok: false, msg: "Faltan user_id o type" });
+    }
+
+    const { error } = await supabase
+      .from("notifications")
+      .update({ read_at: new Date().toISOString() })
+      .eq("user_id", user_id)
+      .eq("type", type)
+      .is("read_at", null);
+
+    if (error) {
+      console.error("Error /notifications/mark-read:", error);
+      return res.json({ ok: false, msg: "Error marcando notificaciones" });
+    }
+
+    return res.json({ ok: true });
+  } catch (err) {
+    console.error("Error general /notifications/mark-read:", err);
     return res.json({ ok: false, msg: "Error interno" });
   }
 });
