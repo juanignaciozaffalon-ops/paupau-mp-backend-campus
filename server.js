@@ -80,11 +80,15 @@ mercadopago.configure({
 // ============================
 const transporter = nodemailer.createTransport({
   host: process.env.SMTP_HOST, // smtp.gmail.com
-  port: Number(process.env.SMTP_PORT || 465),
-  secure: true, // 465 = SSL
+  port: Number(process.env.SMTP_PORT || 587), // 587 = STARTTLS
+  secure: false, // importante: false con 587
   auth: {
     user: process.env.SMTP_USER,
     pass: process.env.SMTP_PASS,
+  },
+  tls: {
+    // por si el entorno tiene algo raro con el certificado
+    rejectUnauthorized: false,
   },
 });
 
@@ -715,9 +719,7 @@ app.get("/test-email", async (req, res) => {
     return res.json({ ok: true, msg: "Correo enviado" });
   } catch (err) {
     console.error("Error test-email:", err);
-    return res
-      .status(500)
-      .json({ ok: false, msg: "Error enviando test" });
+    return res.status(500).json({ ok: false, msg: "Error enviando test" });
   }
 });
 
