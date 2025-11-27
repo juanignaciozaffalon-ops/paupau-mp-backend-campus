@@ -2,7 +2,7 @@
    SERVER.JS FINAL — PAUPAU CAMPUS BACKEND
    Cupón + MP + comprobantes + upsert pagos
    + endpoints admin + facturas + chat
-   + Nodemailer + notificaciones básicas
+   + Nodemailer test
    ============================================ */
 
 import express from "express";
@@ -76,120 +76,17 @@ mercadopago.configure({
 });
 
 // ============================
-// NODEMAILER (Email Notifications)
+// NODEMAILER (SMTP Gmail)
 // ============================
-let transporter = null;
-if (
-  process.env.SMTP_HOST &&
-  process.env.SMTP_PORT &&
-  process.env.SMTP_USER &&
-  process.env.SMTP_PASS
-) {
-  transporter = nodemailer.createTransport({
-    host: process.env.SMTP_HOST,
-    port: Number(process.env.SMTP_PORT),
-    secure: false, // con 587 en Gmail es STARTTLS (no secure)
-    auth: {
-      user: process.env.SMTP_USER,
-      pass: process.env.SMTP_PASS,
-    },
-  });
-} else {
-  console.warn(
-    "⚠️ SMTP_* no configuradas completas, emails de notificación deshabilitados."
-  );
-}
-
-async function sendEmail(to, subject, html) {
-  if (!transporter) {
-    console.warn("⚠️ Intento de enviar email pero transporter no está configurado.");
-    return;
-  }
-
-  try {
-    await transporter.sendMail({
-      from: process.env.SMTP_FROM || process.env.SMTP_USER,
-      to,
-      subject,
-      html,
-    });
-    console.log("📧 Email enviado a:", to);
-  } catch (err) {
-    console.error("❌ Error enviando email:", err);
-  }
-}
-
-// ============================
-// HELPERS DE NOTIFICACIONES
-// ============================
-
-// Obtiene email y nombre del usuario desde profiles
-async function getUserProfile(userId) {
-  try {
-    const { data, error } = await supabase
-      .from("profiles")
-      .select("email, first_name, last_name")
-      .eq("id", userId)
-      .maybeSingle();
-
-    if (error) {
-      console.error("Error buscando perfil para notificación:", error);
-      return null;
-    }
-    return data;
-  } catch (err) {
-    console.error("Error general getUserProfile:", err);
-    return null;
-  }
-}
-
-// Inserta registro en tabla notifications
-async function createNotification({
-  user_id,
-  type,
-  title,
-  message,
-  link = null,
-  meta = null,
-}) {
-  try {
-    const { error } = await supabase.from("notifications").insert([
-      {
-        user_id,
-        type, // ej: "payment_status", "invoice", "chat_message"
-        title,
-        message,
-        link,
-        meta,
-      },
-    ]);
-
-    if (error) {
-      console.error("Error creando notificación:", error);
-    }
-  } catch (err) {
-    console.error("Error general createNotification:", err);
-  }
-}
-
-// Atajo: crea notificación + email
-async function notifyUser({
-  user_id,
-  type,
-  title,
-  message,
-  link = null,
-  meta = null,
-  emailSubject,
-  emailHtml,
-}) {
-  await createNotification({ user_id, type, title, message, link, meta });
-
-  const profile = await getUserProfile(user_id);
-  if (profile?.email) {
-    await sendEmail(profile.email, emailSubject || title, emailHtml || message);
-  }
-}
+const transporter = nodemailer.createTransport({
+  host: process.env.SMTP_HOST, // smtp.gmail.com
+  port: Number(process.env.SMTP_PORT || 465),
+  secure: true, // 465 = SSL
+  auth: {
+    user: process.env.SMTP_USER,
+    pass: process.env.SMTP_PASS,
+  },
+});
 
 // ============================
 // HEALTHCHECK
@@ -524,27 +421,6 @@ app.post("/admin/payment/set", async (req, res) => {
       return res.json({ ok: false, msg: "Error actualizando estado de pago." });
     }
 
-    // 3) Notificación al alumno
-    let statusText = "";
-    if (status === "approved") statusText = "APROBADO";
-    else if (status === "pending") statusText = "PENDIENTE";
-    else statusText = status.toUpperCase();
-
-    const humanMonth = monthYear;
-
-    await notifyUser({
-      user_id,
-      type: "payment_status",
-      title: "Estado de pago actualizado",
-      message: `Tu pago del mes ${humanMonth} ahora figura como: ${statusText}.`,
-      link: null,
-      meta: { month_year: monthYear, status },
-      emailSubject: "PauPau Campus — Actualización de estado de pago",
-      emailHtml: `<p>Hola 👋</p>
-        <p>Te avisamos que el estado de tu pago del mes <strong>${humanMonth}</strong> fue actualizado a: <strong>${statusText}</strong>.</p>
-        <p>Podés ver el detalle entrando al Campus PauPau.</p>`,
-    });
-
     return res.json({ ok: true });
   } catch (err) {
     console.error("Exception en /admin/payment/set:", err);
@@ -601,7 +477,7 @@ app.get("/admin/teachers", async (req, res) => {
 // FACTURAS — SUBIDA POR ADMIN Y CONSULTA (HISTORIAL)
 // =====================================================
 
-const INVOICES_BUCKET = "payment_invoices"; // bucket que creaste para facturas
+const INVOICES_BUCKET = "invoices"; // nombre del bucket que creaste
 
 // Body (form-data):
 // - file   (archivo factura PDF/JPG/PNG)
@@ -652,6 +528,7 @@ app.post(
       const publicUrl = publicData?.publicUrl || null;
       const monthYear = month; // "YYYY-MM"
 
+      // amount puede ser null
       const amountNumber =
         amount != null && amount !== "" ? Number(amount) : null;
 
@@ -663,6 +540,7 @@ app.post(
             month_year: monthYear,
             amount: amountNumber,
             file_url: publicUrl,
+            created_at: new Date().toISOString(),
           },
           {
             onConflict: "user_id,month_year",
@@ -676,21 +554,6 @@ app.post(
           msg: "Factura subida pero no se pudo guardar el registro.",
         });
       }
-
-      // Notificar al alumno
-      const humanMonth = monthYear;
-      await notifyUser({
-        user_id,
-        type: "invoice",
-        title: "Nueva factura disponible",
-        message: `Se cargó una nueva factura para el mes ${humanMonth}.`,
-        link: null,
-        meta: { month_year: monthYear, amount: amountNumber, url: publicUrl },
-        emailSubject: "PauPau Campus — Nueva factura disponible",
-        emailHtml: `<p>Hola 👋</p>
-          <p>Ya está disponible tu factura del mes <strong>${humanMonth}</strong>.</p>
-          <p>Podés verla y descargarla entrando al Campus PauPau.</p>`,
-      });
 
       return res.json({ ok: true, url: publicUrl });
     } catch (err) {
@@ -801,11 +664,10 @@ app.get("/chat/messages", async (req, res) => {
   }
 });
 
-// POST /chat/messages
-// Body: { room, sender_id, content, recipient_id (opcional) }
+// POST /chat/messages  Body: { room, sender_id, content }
 app.post("/chat/messages", async (req, res) => {
   try {
-    const { room, sender_id, content, recipient_id } = req.body || {};
+    const { room, sender_id, content } = req.body || {};
     if (!room || !sender_id || !content) {
       return res.json({
         ok: false,
@@ -831,22 +693,6 @@ app.post("/chat/messages", async (req, res) => {
       });
     }
 
-    // Notificar al destinatario si viene recipient_id
-    if (recipient_id) {
-      await notifyUser({
-        user_id: recipient_id,
-        type: "chat_message",
-        title: "Nuevo mensaje de chat",
-        message: "Recibiste un nuevo mensaje en el chat del Campus.",
-        link: null,
-        meta: { room, sender_id },
-        emailSubject: "PauPau Campus — Nuevo mensaje de chat",
-        emailHtml: `<p>Hola 👋</p>
-          <p>Tenés un nuevo mensaje en el chat del Campus PauPau.</p>
-          <p>Iniciá sesión para leerlo y responder.</p>`,
-      });
-    }
-
     return res.json({ ok: true, message: data });
   } catch (err) {
     console.error("Error general POST /chat/messages:", err);
@@ -869,7 +715,9 @@ app.get("/test-email", async (req, res) => {
     return res.json({ ok: true, msg: "Correo enviado" });
   } catch (err) {
     console.error("Error test-email:", err);
-    return res.status(500).json({ ok: false, msg: "Error enviando test" });
+    return res
+      .status(500)
+      .json({ ok: false, msg: "Error enviando test" });
   }
 });
 
