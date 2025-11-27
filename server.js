@@ -462,7 +462,7 @@ app.get("/admin/teachers", async (req, res) => {
 // FACTURAS — SUBIDA POR ADMIN Y CONSULTA (HISTORIAL)
 // =====================================================
 
-const INVOICES_BUCKET = "payment_invoices"; // bucket que creaste para facturas
+const INVOICES_BUCKET = "invoices"; // bucket que creaste para facturas
 
 // Body (form-data):
 // - file   (archivo factura PDF/JPG/PNG)
