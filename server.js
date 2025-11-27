@@ -2,7 +2,7 @@
    SERVER.JS FINAL — PAUPAU CAMPUS BACKEND
    Cupón + MP + comprobantes + upsert pagos
    + endpoints admin + facturas + chat
-   + notificaciones + emails
+   + Nodemailer + notificaciones email
    ============================================ */
 
 import express from "express";
@@ -81,18 +81,19 @@ mercadopago.configure({
 const transporter = nodemailer.createTransport({
   host: process.env.SMTP_HOST, // smtp.gmail.com
   port: Number(process.env.SMTP_PORT || 587), // 587 = STARTTLS
-  secure: false,
+  secure: false, // importante: false con 587
   auth: {
     user: process.env.SMTP_USER,
     pass: process.env.SMTP_PASS,
   },
   tls: {
+    // por si el entorno tiene algo raro con el certificado
     rejectUnauthorized: false,
   },
 });
 
 // ============================
-// HELPERS EMAIL + NOTIFICACIONES
+// HELPER EMAIL NOTIFICACIONES
 // ============================
 async function sendNotificationEmail(to, subject, text) {
   if (!to) return;
@@ -105,23 +106,6 @@ async function sendNotificationEmail(to, subject, text) {
     });
   } catch (err) {
     console.error("Error enviando mail de notificación:", err);
-  }
-}
-
-async function createNotification({ user_id, type, message, ref_id }) {
-  if (!user_id || !type) return;
-  try {
-    const { error } = await supabase.from("notifications").insert({
-      user_id,
-      type,
-      message: message || null,
-      ref_id: ref_id || null,
-    });
-    if (error) {
-      console.error("Error creando notificación:", error);
-    }
-  } catch (err) {
-    console.error("Error general creando notificación:", err);
   }
 }
 
@@ -256,7 +240,7 @@ const createPreferenceHandler = async (req, res) => {
   }
 };
 
-// Rutas MP
+// Ruta nueva y ruta vieja (por compatibilidad)
 app.post("/mp/create-preference", createPreferenceHandler);
 app.post("/crear-preferencia", createPreferenceHandler);
 
@@ -324,7 +308,7 @@ app.post(
           month_year: monthYear,
           status: "receipt_uploaded",
           receipt_url: publicUrl,
-          amount: 0,
+          amount: 0, // el admin después puede actualizar, pero nunca será NULL
           receipt_uploaded_at: new Date().toISOString(),
           source: "receipt_upload",
         },
@@ -341,8 +325,6 @@ app.post(
         });
       }
 
-      // (Opcional) Notificación a admin: la dejamos para más adelante si querés.
-
       return res.json({ ok: true, url: publicUrl });
     } catch (err) {
       console.error("Error /payments/upload-receipt:", err);
@@ -354,6 +336,7 @@ app.post(
 // =====================================================
 // ADMIN — OBTENER PAGOS DE UN ALUMNO (COMPROBANTES)
 // =====================================================
+// Query: ?user_id=...&month=YYYY-MM (mes opcional)
 app.get("/admin/payments/user", async (req, res) => {
   try {
     const { user_id, month } = req.query || {};
@@ -367,7 +350,7 @@ app.get("/admin/payments/user", async (req, res) => {
       query = query.eq("month_year", month);
     }
 
-    const { data, error } = await query.order("created_at", {
+    const { data, error } = await query.order("month_year", {
       ascending: false,
     });
 
@@ -386,6 +369,7 @@ app.get("/admin/payments/user", async (req, res) => {
 // =====================================================
 // ADMIN — RESUMEN PAGOS MES (CON FILTRO POR MES)
 // =====================================================
+// Query: ?month=YYYY-MM
 app.get("/admin/payments/summary", async (req, res) => {
   try {
     const { month } = req.query || {};
@@ -395,7 +379,7 @@ app.get("/admin/payments/summary", async (req, res) => {
       .from("payments")
       .select("*")
       .eq("month_year", monthYear)
-      .order("created_at", { ascending: false });
+      .order("updated_at", { ascending: false });
 
     if (error) {
       console.error("Error admin/payments/summary:", error);
@@ -435,6 +419,7 @@ app.post("/admin/payment/set", async (req, res) => {
       return res.json({ ok: false, msg: "Error buscando pago existente." });
     }
 
+    // Si existe, usamos el amount de la fila. Si no, usamos 0 como default.
     const amount = existing?.amount ?? 0;
 
     // 2) Upsert con amount incluido (no puede ser NULL)
@@ -444,7 +429,7 @@ app.post("/admin/payment/set", async (req, res) => {
         {
           user_id,
           month_year: monthYear,
-          status,
+          status, // "approved" o "pending"
           amount,
         },
         {
@@ -457,41 +442,6 @@ app.post("/admin/payment/set", async (req, res) => {
       return res.json({ ok: false, msg: "Error actualizando estado de pago." });
     }
 
-    // 3) Notificación + email al alumno
-    try {
-      const { data: student, error: stErr } = await supabase
-        .from("profiles")
-        .select("email, first_name, last_name")
-        .eq("id", user_id)
-        .maybeSingle();
-      if (stErr) {
-        console.error("Error buscando alumno para notificación pago:", stErr);
-      } else if (student && student.email) {
-        const fullName =
-          `${student.first_name || ""} ${student.last_name || ""}`.trim() ||
-          "";
-        const statusText =
-          status === "approved"
-            ? "aprobado"
-            : status === "pending"
-            ? "pendiente"
-            : status;
-        const msg = `Tu pago del mes ${monthYear} fue marcado como "${statusText}".`;
-
-        await createNotification({
-          user_id,
-          type: "payment",
-          message: msg,
-        });
-
-        const subject = "Actualización de pago en PauPau Campus";
-        const text = `Hola ${fullName || "alumno/a"} 👋\n\n${msg}\n\nPodés ver el detalle en la sección Pagos del Campus PauPau.\n\n— Equipo PauPau`;
-        await sendNotificationEmail(student.email, subject, text);
-      }
-    } catch (e) {
-      console.error("Error creando notificación de pago:", e);
-    }
-
     return res.json({ ok: true });
   } catch (err) {
     console.error("Exception en /admin/payment/set:", err);
@@ -500,8 +450,10 @@ app.post("/admin/payment/set", async (req, res) => {
 });
 
 // =====================================================
-// ADMIN — LISTA DE USUARIOS Y PROFES
+// ADMIN — LISTA DE USUARIOS Y PROFES (para panel admin)
 // =====================================================
+
+// Devuelve todos los perfiles (el filtro por texto se hace en el front)
 app.get("/admin/users", async (req, res) => {
   try {
     const { data, error } = await supabase
@@ -522,6 +474,7 @@ app.get("/admin/users", async (req, res) => {
   }
 });
 
+// Devuelve sólo los perfiles con rol=teacher
 app.get("/admin/teachers", async (req, res) => {
   try {
     const { data, error } = await supabase
@@ -545,7 +498,7 @@ app.get("/admin/teachers", async (req, res) => {
 // FACTURAS — SUBIDA POR ADMIN Y CONSULTA (HISTORIAL)
 // =====================================================
 
-const INVOICES_BUCKET = "invoices";
+const INVOICES_BUCKET = "invoices"; // nombre del bucket que creaste
 
 // Body (form-data):
 // - file   (archivo factura PDF/JPG/PNG)
@@ -594,12 +547,13 @@ app.post(
         .getPublicUrl(fileName);
 
       const publicUrl = publicData?.publicUrl || null;
-      const monthYear = month;
+      const monthYear = month; // "YYYY-MM"
 
+      // amount puede ser null
       const amountNumber =
         amount != null && amount !== "" ? Number(amount) : null;
 
-      const { error: invErr, data: invData } = await supabase
+      const { error: invErr } = await supabase
         .from("invoices")
         .upsert(
           {
@@ -612,9 +566,7 @@ app.post(
           {
             onConflict: "user_id,month_year",
           }
-        )
-        .select()
-        .single();
+        );
 
       if (invErr) {
         console.error("Error guardando factura en tabla invoices:", invErr);
@@ -624,7 +576,7 @@ app.post(
         });
       }
 
-      // Notificación + email al alumno
+      // Notificar al alumno por email
       try {
         const { data: student, error: stErr } = await supabase
           .from("profiles")
@@ -632,27 +584,23 @@ app.post(
           .eq("id", user_id)
           .maybeSingle();
 
-        if (stErr) {
-          console.error("Error buscando alumno para factura:", stErr);
-        } else if (student && student.email) {
-          const fullName =
-            `${student.first_name || ""} ${student.last_name || ""}`.trim() ||
-            "";
-          const msg = `Se cargó una nueva factura para el mes ${monthYear}.`;
+        if (!stErr && student && student.email) {
+          const subject = "Nueva factura disponible en el Campus PauPau";
+          const text = `Hola ${student.first_name || ""} 👋
 
-          await createNotification({
-            user_id,
-            type: "invoice",
-            message: msg,
-            ref_id: invData?.id || null,
-          });
+Se cargó una nueva factura de tu curso en el Campus PauPau.
 
-          const subject = "Nueva factura disponible en PauPau Campus";
-          const text = `Hola ${fullName || "alumno/a"} 👋\n\n${msg}\n\nPodés descargarla desde la sección Pagos del Campus PauPau.\n\n— Equipo PauPau`;
+Mes: ${monthYear}
+${amountNumber != null ? `Importe: $${amountNumber}\n` : ""}
+
+Podés verla y descargarla entrando a la sección de Pagos en el campus.
+
+— Equipo PauPau`;
+
           await sendNotificationEmail(student.email, subject, text);
         }
-      } catch (e) {
-        console.error("Error creando notificación de factura:", e);
+      } catch (mailErr) {
+        console.error("Error enviando mail de factura:", mailErr);
       }
 
       return res.json({ ok: true, url: publicUrl });
@@ -663,7 +611,8 @@ app.post(
   }
 );
 
-// Obtener historial de facturas por usuario
+// Obtener historial de facturas por usuario (y mes opcional)
+// GET /invoices/user?user_id=...&month=YYYY-MM
 app.get("/invoices/user", async (req, res) => {
   try {
     const { user_id, month } = req.query || {};
@@ -696,7 +645,8 @@ app.get("/invoices/user", async (req, res) => {
   }
 });
 
-// Resumen de facturas por mes
+// Resumen de facturas por mes (para admin)
+// GET /admin/invoices/summary?month=YYYY-MM
 app.get("/admin/invoices/summary", async (req, res) => {
   try {
     const { month } = req.query || {};
@@ -724,7 +674,7 @@ app.get("/admin/invoices/summary", async (req, res) => {
 });
 
 // =====================================================
-// CHAT — ENDPOINTS
+// CHAT — ENDPOINTS (para usar desde el front)
 // =====================================================
 
 // GET /chat/messages?room=room_...&since=ISO_OPCIONAL
@@ -762,224 +712,184 @@ app.get("/chat/messages", async (req, res) => {
   }
 });
 
-// POST /chat/messages  Body: { room, sender_id, recipient_id, content }
-app.post("/chat/messages", async (req, res) => {
+// ============================
+// NOTIFICACIÓN: MENSAJE DE CHAT NUEVO
+// ============================
+// Body: { recipient_id, sender_id, content }
+app.post("/notify/chat", async (req, res) => {
   try {
-    const { room, sender_id, recipient_id, content } = req.body || {};
-    if (!room || !sender_id || !content) {
+    const { recipient_id, sender_id, content } = req.body || {};
+    if (!recipient_id || !sender_id || !content) {
       return res.json({
         ok: false,
-        msg: "Faltan room, sender_id o content",
+        msg: "Faltan recipient_id, sender_id o content",
       });
     }
 
-    const { data: msg, error } = await supabase
-      .from("messages")
-      .insert({
-        room,
-        sender_id,
-        content,
-      })
-      .select()
-      .single();
+    const { data: recipient, error: recErr } = await supabase
+      .from("profiles")
+      .select("email, first_name, last_name")
+      .eq("id", recipient_id)
+      .maybeSingle();
 
-    if (error) {
-      console.error("Error insertando mensaje de chat:", error);
+    if (recErr || !recipient || !recipient.email) {
+      console.error("Error buscando destinatario chat:", recErr);
       return res.json({
         ok: false,
-        msg: "No se pudo guardar el mensaje",
+        msg: "No se encontró email del destinatario",
       });
     }
 
-    // Notificación + email al destinatario
-    if (recipient_id) {
-      try {
-        const { data: recipient, error: recErr } = await supabase
-          .from("profiles")
-          .select("email, first_name, last_name")
-          .eq("id", recipient_id)
-          .maybeSingle();
+    const { data: sender } = await supabase
+      .from("profiles")
+      .select("first_name, last_name, email")
+      .eq("id", sender_id)
+      .maybeSingle();
 
-        if (recErr) {
-          console.error("Error buscando destinatario chat:", recErr);
-        } else if (recipient && recipient.email) {
-          const { data: sender } = await supabase
-            .from("profiles")
-            .select("first_name, last_name, email")
-            .eq("id", sender_id)
-            .maybeSingle();
+    const senderName =
+      (sender
+        ? `${sender.first_name || ""} ${sender.last_name || ""}`.trim()
+        : "") || "tu profesora";
 
-          const senderName =
-            (sender
-              ? `${sender.first_name || ""} ${
-                  sender.last_name || ""
-                }`.trim()
-              : "") || "tu profesora";
+    const subject = "Nuevo mensaje en el chat del Campus PauPau";
+    const text = `Hola ${recipient.first_name || ""} 👋
 
-          const baseMsg = `Tenés un mensaje nuevo en el chat del Campus PauPau.`;
-          const notifMsg = `${baseMsg} Remitente: ${senderName}.`;
+${senderName} te envió un mensaje nuevo en el chat del campus:
 
-          await createNotification({
-            user_id: recipient_id,
-            type: "chat",
-            message: notifMsg,
-            ref_id: msg.id,
-          });
+"${content}"
 
-          const subject = "Nuevo mensaje en el chat de PauPau Campus";
-          const text = `Hola ${
-            recipient.first_name || ""
-          } 👋\n\n${senderName} te envió un mensaje nuevo en el chat del campus.\n\nMensaje:\n"${content}"\n\nIngresá al Campus PauPau para responder.\n\n— Equipo PauPau`;
-          await sendNotificationEmail(recipient.email, subject, text);
-        }
-      } catch (e) {
-        console.error("Error creando notificación de chat:", e);
-      }
-    }
+Ingresá al Campus PauPau para continuar la conversación.
 
-    return res.json({ ok: true, message: msg });
+— Equipo PauPau`;
+
+    await sendNotificationEmail(recipient.email, subject, text);
+
+    return res.json({ ok: true });
   } catch (err) {
-    console.error("Error general POST /chat/messages:", err);
+    console.error("Error /notify/chat:", err);
     return res.json({ ok: false, msg: "Error interno" });
   }
 });
 
-// =====================================================
-// ASSIGNMENTS — CREAR (prof/admin)
-// =====================================================
-// Body: { teacher_id, student_id, title, description, file_url }
-app.post("/assignments/create", async (req, res) => {
+// ============================
+// NOTIFICACIÓN: TAREA NUEVA
+// ============================
+// Body: { student_id, teacher_id, title, description }
+app.post("/notify/assignment", async (req, res) => {
   try {
-    const { teacher_id, student_id, title, description, file_url } =
-      req.body || {};
-    if (!teacher_id || !student_id || !title) {
+    const { student_id, teacher_id, title, description } = req.body || {};
+    if (!student_id || !title) {
+      return res.json({ ok: false, msg: "Faltan student_id o title" });
+    }
+
+    const { data: student, error: stErr } = await supabase
+      .from("profiles")
+      .select("email, first_name, last_name")
+      .eq("id", student_id)
+      .maybeSingle();
+
+    if (stErr || !student || !student.email) {
+      console.error("Error buscando alumno para mail tarea:", stErr);
       return res.json({
         ok: false,
-        msg: "Faltan teacher_id, student_id o title",
+        msg: "No se encontró email del alumno",
       });
     }
 
-    const { data, error } = await supabase
-      .from("assignments")
-      .insert({
-        teacher_id,
-        student_id,
-        title,
-        description: description || null,
-        file_url: file_url || null,
-      })
-      .select()
-      .single();
-
-    if (error) {
-      console.error("Error creando assignment:", error);
-      return res.json({ ok: false, msg: "No se pudo crear la tarea." });
-    }
-
-    // Notificación + email al alumno
-    try {
-      const { data: student, error: stErr } = await supabase
+    let senderName = "tu profesora";
+    if (teacher_id) {
+      const { data: teacher } = await supabase
         .from("profiles")
-        .select("email, first_name, last_name")
-        .eq("id", student_id)
+        .select("first_name, last_name")
+        .eq("id", teacher_id)
         .maybeSingle();
-
-      if (stErr) {
-        console.error("Error buscando alumno assignment:", stErr);
-      } else if (student && student.email) {
-        const fullName =
-          `${student.first_name || ""} ${student.last_name || ""}`.trim() ||
-          "";
-        const msg = `Se te asignó una nueva tarea: "${title}".`;
-
-        await createNotification({
-          user_id: student_id,
-          type: "assignment",
-          message: msg,
-          ref_id: data.id,
-        });
-
-        const subject = "Nueva tarea en PauPau Campus";
-        const text = `Hola ${fullName || "alumno/a"} 👋\n\n${msg}\n\nPodés verla y subir tu respuesta en la sección Tareas del Campus PauPau.\n\n— Equipo PauPau`;
-        await sendNotificationEmail(student.email, subject, text);
+      if (teacher) {
+        const n =
+          `${teacher.first_name || ""} ${
+            teacher.last_name || ""
+          }`.trim() || null;
+        if (n) senderName = n;
       }
-    } catch (e) {
-      console.error("Error creando notificación assignment:", e);
     }
 
-    return res.json({ ok: true, assignment: data });
+    const subject = "Nueva tarea en el Campus PauPau";
+    const text = `Hola ${student.first_name || ""} 👋
+
+${senderName} te asignó una nueva tarea en el Campus PauPau.
+
+Título: ${title}
+${description ? `Descripción: ${description}\n` : ""}
+
+Ingresá al campus para verla y subir tu entrega.
+
+— Equipo PauPau`;
+
+    await sendNotificationEmail(student.email, subject, text);
+
+    return res.json({ ok: true });
   } catch (err) {
-    console.error("Error general /assignments/create:", err);
+    console.error("Error /notify/assignment:", err);
     return res.json({ ok: false, msg: "Error interno" });
   }
 });
 
-// =====================================================
-// RECORDINGS — CREAR (prof/admin)
-// =====================================================
-// Body: { teacher_id, student_id, title, description, video_url }
-app.post("/recordings/create", async (req, res) => {
+// ============================
+// NOTIFICACIÓN: CLASE GRABADA NUEVA
+// ============================
+// Body: { student_id, teacher_id, title }
+app.post("/notify/recording", async (req, res) => {
   try {
-    const { teacher_id, student_id, title, description, video_url } =
-      req.body || {};
-    if (!teacher_id || !student_id || !title || !video_url) {
+    const { student_id, teacher_id, title } = req.body || {};
+    if (!student_id || !title) {
+      return res.json({ ok: false, msg: "Faltan student_id o title" });
+    }
+
+    const { data: student, error: stErr } = await supabase
+      .from("profiles")
+      .select("email, first_name, last_name")
+      .eq("id", student_id)
+      .maybeSingle();
+
+    if (stErr || !student || !student.email) {
+      console.error("Error buscando alumno para mail grabación:", stErr);
       return res.json({
         ok: false,
-        msg: "Faltan teacher_id, student_id, title o video_url",
+        msg: "No se encontró email del alumno",
       });
     }
 
-    const { data, error } = await supabase
-      .from("recordings")
-      .insert({
-        teacher_id,
-        student_id,
-        title,
-        description: description || null,
-        video_url,
-      })
-      .select()
-      .single();
-
-    if (error) {
-      console.error("Error creando recording:", error);
-      return res.json({ ok: false, msg: "No se pudo guardar la grabación." });
-    }
-
-    // Notificación + email al alumno
-    try {
-      const { data: student, error: stErr } = await supabase
+    let senderName = "tu profesora";
+    if (teacher_id) {
+      const { data: teacher } = await supabase
         .from("profiles")
-        .select("email, first_name, last_name")
-        .eq("id", student_id)
+        .select("first_name, last_name")
+        .eq("id", teacher_id)
         .maybeSingle();
-
-      if (stErr) {
-        console.error("Error buscando alumno recording:", stErr);
-      } else if (student && student.email) {
-        const fullName =
-          `${student.first_name || ""} ${student.last_name || ""}`.trim() ||
-          "";
-        const msg = `Tu profesora cargó una nueva clase grabada: "${title}".`;
-
-        await createNotification({
-          user_id: student_id,
-          type: "recording",
-          message: msg,
-          ref_id: data.id,
-        });
-
-        const subject = "Nueva clase grabada en PauPau Campus";
-        const text = `Hola ${fullName || "alumno/a"} 👋\n\n${msg}\n\nPodés verla en la sección Clases grabadas del Campus PauPau.\n\n— Equipo PauPau`;
-        await sendNotificationEmail(student.email, subject, text);
+      if (teacher) {
+        const n =
+          `${teacher.first_name || ""} ${
+            teacher.last_name || ""
+          }`.trim() || null;
+        if (n) senderName = n;
       }
-    } catch (e) {
-      console.error("Error creando notificación recording:", e);
     }
 
-    return res.json({ ok: true, recording: data });
+    const subject = "Nueva clase grabada en el Campus PauPau";
+    const text = `Hola ${student.first_name || ""} 👋
+
+${senderName} subió una nueva clase grabada para vos.
+
+Título: ${title}
+
+Ingresá al Campus PauPau para verla.
+
+— Equipo PauPau`;
+
+    await sendNotificationEmail(student.email, subject, text);
+
+    return res.json({ ok: true });
   } catch (err) {
-    console.error("Error general /recordings/create:", err);
+    console.error("Error /notify/recording:", err);
     return res.json({ ok: false, msg: "Error interno" });
   }
 });
@@ -991,7 +901,7 @@ app.get("/test-email", async (req, res) => {
   try {
     await transporter.sendMail({
       from: process.env.SMTP_FROM,
-      to: "paupaulanguagesadmi@gmail.com",
+      to: "paupaulanguagesadmi@gmail.com", // tu mail real
       subject: "Test PauPau Notificaciones",
       text: "Este es un test de nodemailer funcionando en Render 🚀",
     });
