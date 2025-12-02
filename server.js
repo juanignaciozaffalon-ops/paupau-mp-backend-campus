@@ -1176,17 +1176,18 @@ app.post("/crear-preferencia", async (req, res) => {
 
   try {
     const prefMetadata = {
-      ...metadata,
-      group_ref: groupRef,
-      reservas_ids: reservasIds,
-      alumno_nombre: name,
-      alumno_email: email,
-      modalidad,
-      tipo_curso: tipo_curso, // ej: "intensivo90"
-      teacher: form?.profesor || metadata?.teacher || null,
-      grupo_label: form?.grupo_label || metadata?.grupo_label || null,
-      form_preview,
-    };
+  ...metadata,
+  group_ref: groupRef,
+  reservas_ids: reservasIds,
+  alumno_nombre: name,
+  alumno_email: email,
+  modalidad,
+  // 👉 NUEVO: marca que es el curso intensivo
+  tipo_curso: form?.tipo_curso || metadata?.tipo_curso || null,
+  teacher: form?.profesor || metadata?.teacher || null,
+  grupo_label: form?.grupo_label || metadata?.grupo_label || null,
+  form_preview,
+};
 
     const pref = {
       items: [
