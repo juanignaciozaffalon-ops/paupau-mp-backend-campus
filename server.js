@@ -459,7 +459,6 @@ app.post("/admin/payment/set", async (req, res) => {
     return res.json({ ok: false, msg: "Error inesperado." });
   }
 });
-
 // =====================================================
 // ADMIN — USERS / TEACHERS (campus)
 // =====================================================
@@ -907,7 +906,6 @@ app.get("/test-email", async (req, res) => {
     return res.status(500).json({ ok: false, msg: "Error enviando test" });
   }
 });
-
 // =====================================================
 // =========== INSCRIPCIONES WEB (Postgres) ============
 // ====== /horarios, /hold, /crear-preferencia, webhook
@@ -951,8 +949,6 @@ const PROF_EMAILS = {
   Gissel: "paupaulanguages3@gmail.com",
   Heliana: "paupaulanguages9@gmail.com",
 };
-
-// HEALTH inscripciones (mismo /health ya definido, no hace falta otro)
 
 // ----------- PÚBLICO /horarios ----------
 app.get("/horarios", async (_req, res) => {
@@ -1035,6 +1031,9 @@ app.post("/hold", async (req, res) => {
 });
 
 // ----------- CREAR PREFERENCIA INSCRIPCIONES ----------
+// * Soporta:
+//   - Modalidad "individual" (usa horarios / reservas como siempre)
+//   - Otras modalidades/web (grupal, Intensivo 90 días, etc.) SIN tocar reservas
 app.post("/crear-preferencia", async (req, res) => {
   if (!pool) return res.status(500).json({ error: "db_not_configured" });
 
@@ -1070,17 +1069,29 @@ app.post("/crear-preferencia", async (req, res) => {
       message: "MP_ACCESS_TOKEN no configurado",
     });
 
+  // modalides:
+  // - "individual"  -> requiere horarios / reservas
+  // - "grupal"      -> NO requiere horarios (ej: cursos grupales)
+  // - "intensivo90" -> NO requiere horarios (nuevo curso Intensivo 90 días)
   const modalidad =
     (form && String(form.modalidad || "individual").toLowerCase()) ||
     "individual";
+
+  // Detectamos tipo de curso especial si viene desde el form o metadata
+  const tipo_curso =
+    (form && form.tipo_curso && String(form.tipo_curso).toLowerCase()) ||
+    (metadata && metadata.tipo_curso && String(metadata.tipo_curso).toLowerCase()) ||
+    null;
 
   let list = Array.isArray(horarios_ids)
     ? horarios_ids.map(Number).filter(Boolean)
     : [];
   if (!list.length && Number(horario_id)) list = [Number(horario_id)];
 
-  // Para INDIVIDUAL requerimos horarios; para GRUPAL no
-  if (modalidad === "individual" && !list.length) {
+  // Para INDIVIDUAL requerimos horarios; para GRUPAL / INTENSIVO90 no
+  const requiereHorarios = modalidad === "individual";
+
+  if (requiereHorarios && !list.length) {
     return res.status(400).json({
       error: "bad_request",
       message: "horarios_ids o horario_id requerido para modalidad individual",
@@ -1096,7 +1107,8 @@ app.post("/crear-preferencia", async (req, res) => {
   const groupRef = uuid();
   const reservasIds = [];
 
-  if (modalidad === "individual") {
+  // Solo creamos reservas en DB cuando es modalidad INDIVIDUAL
+  if (requiereHorarios) {
     try {
       await pool.query("BEGIN");
 
@@ -1157,10 +1169,25 @@ app.post("/crear-preferencia", async (req, res) => {
         frecuencia: String(form.frecuencia || ""),
         profesor: String(form.profesor || ""),
         extra_info: String(form.extra_info || ""),
+        // Para el Intensivo 90 días podemos guardar también la sede/edición si la hubiera
+        programa: String(form.programa || form.program || ""),
       }
     : null;
 
   try {
+    const prefMetadata = {
+      ...metadata,
+      group_ref: groupRef,
+      reservas_ids: reservasIds,
+      alumno_nombre: name,
+      alumno_email: email,
+      modalidad,
+      tipo_curso: tipo_curso, // ej: "intensivo90"
+      teacher: form?.profesor || metadata?.teacher || null,
+      grupo_label: form?.grupo_label || metadata?.grupo_label || null,
+      form_preview,
+    };
+
     const pref = {
       items: [
         {
@@ -1172,18 +1199,9 @@ app.post("/crear-preferencia", async (req, res) => {
       ],
       back_urls,
       auto_return: "approved",
-      metadata: {
-        ...metadata,
-        group_ref: groupRef,
-        reservas_ids: reservasIds,
-        alumno_nombre: name,
-        alumno_email: email,
-        modalidad,
-        teacher: form?.profesor || metadata?.teacher || null,
-        grupo_label: form?.grupo_label || metadata?.grupo_label || null,
-        form_preview,
-      },
+      metadata: prefMetadata,
     };
+
     const mpResp = await mercadopago.preferences.create(pref);
     const data = mpResp?.body || mpResp;
 
@@ -1193,6 +1211,8 @@ app.post("/crear-preferencia", async (req, res) => {
       sandbox_init_point: data.sandbox_init_point,
       group_ref: groupRef,
       reservas_ids: reservasIds,
+      modalidad,
+      tipo_curso,
     });
   } catch (e) {
     console.error("[MP error]", e?.message, "\n[MP error data]", e?.response?.body);
@@ -1203,7 +1223,6 @@ app.post("/crear-preferencia", async (req, res) => {
     });
   }
 });
-
 // ----------- WEBHOOK MP (inscripciones) ----------
 app.post("/webhook", async (req, res) => {
   if (!pool) {
@@ -1232,172 +1251,130 @@ app.post("/webhook", async (req, res) => {
     if (evento?.data?.status && evento.data.status !== "approved")
       return res.sendStatus(200);
 
+    // -----------------------------------------------
+    // DETECTAMOS MODALIDAD y TIPO CURSO
+    // -----------------------------------------------
     const modalidad = String(meta?.modalidad || "individual").toLowerCase();
+    const tipo_curso = meta?.tipo_curso || null;
 
-    // ===== GRUPAL =====
-    if (modalidad === "grupal") {
-      const alumnoNombre = meta?.alumno_nombre || "Alumno";
-      const alumnoEmail = meta?.alumno_email || "";
-      const profesorName = meta?.teacher || "Profesor";
-      const horariosTxt = meta?.grupo_label || "";
-      const profEmail = PROF_EMAILS[profesorName] || "";
-      const pv = meta?.form_preview || {};
+    const alumnoNombre = meta?.alumno_nombre || "Alumno";
+    const alumnoEmail = meta?.alumno_email || "";
+    const profesorName = meta?.teacher || "Profesor";
+    const horariosTxt = meta?.grupo_label || "";
+    const profEmail =
+      PROF_EMAILS[profesorName] || (profesorName === "Paula Toledo" ? "paauutooledo@gmail.com" : "");
 
-      const extraInfo = (pv?.extra_info || "").trim();
+    const pv = meta?.form_preview || {};
+    const extraInfo = (pv?.extra_info || "").trim();
 
-      const alumnoHtml = `<!doctype html>
-<html lang="es" style="margin:0;padding:0;">
-<head>
-  <meta charset="utf-8"><meta name="viewport" content="width=device-width"/>
-  <title>Bienvenida PauPau Languages</title>
-</head>
-<body style="margin:0; padding:0; background:#f6f7fb;">
-  <center style="width:100%; background:#f6f7fb; padding:24px 12px;">
-    <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" style="max-width:640px; margin:0 auto;">
-      <tr><td>
-        <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" 
-               style="background:#ffffff; border-radius:16px; overflow:hidden; box-shadow:0 8px 24px rgba(0,0,0,.08);">
-          <tr><td style="background:#3954A5; height:6px; font-size:0; line-height:0;">&nbsp;</td></tr>
-          <tr><td style="padding:28px; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial, sans-serif; color:#222;">
-            <h1 style="margin:0 0 14px; font-size:22px; line-height:1.35;">¡Hola ${alumnoNombre}!</h1>
-            <p style="margin:0 0 10px; font-size:15px; line-height:1.6;">¡Qué alegría que seas parte de nuestra Escuela! Estoy feliz de recibirte y darte la bienvenida.</p>
-            <p style="margin:0 0 18px; font-size:15px; line-height:1.6;">En Paupau Languages, conectamos personas con el mundo y desde hoy vos también sos parte de esa comunidad.</p>
-            <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0"
-                   style="background:#f7f8ff; border:1px solid #e4e7ff; border-radius:12px; padding:14px; margin:6px 0 16px;">
-              <tr><td style="font-size:14px; line-height:1.6; color:#1d2340;">
-                <div style="margin:0 0 8px;"><strong>Modalidad:</strong> Clases grupales</div>
-                <div style="margin:0 0 8px;"><strong>Tu docente:</strong> ${profesorName}</div>
-                <div style="margin:0 0 8px;"><strong>Grupo:</strong> ${horariosTxt} <span style="color:#5b64a5;">(hora Argentina)</span></div>
-                <div style="margin:0 0 8px;"><strong>Profesor/tutor:</strong> ${profesorName}</div>
-                <div style="margin:0;"><strong>Correo del profesor:</strong> ${profEmail || '(lo recibirás pronto)'}</div>
-              </td></tr>
-            </table>
-            <p style="margin:0 0 10px; font-size:15px; line-height:1.6;">Te pedimos puntualidad y cámara/micrófono encendidos para una mejor experiencia.</p>
-            <p style="margin:0 0 18px; font-size:15px; line-height:1.6;">Más cerca de la fecha de inicio tu docente te enviará los links de acceso.</p>
-            <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0"
-                   style="background:#fff8ee; border:1px solid #ffe2b9; border-radius:12px; padding:14px; margin:0 0 18px;">
-              <tr><td style="font-size:14px; line-height:1.6; color:#8a4a00;">
-                <strong>Aranceles:</strong> Se abonan del 1 al 7 de cada mes por transferencia bancaria.
-                En caso de no abonar en tiempo y forma, las clases se suspenderán.
-              </td></tr>
-            </table>
-            <p style="margin:0 0 4px; font-size:14px; line-height:1.6; color:#4b4f66;">Si surge cualquier duda, escribinos cuando quieras.</p>
-          </td></tr>
-          <tr><td style="padding:18px 28px 26px; font-family:-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial, sans-serif;">
-            <div style="font-size:13px; color:#707797; line-height:1.6;">
-              <div style="margin:0 0 4px;"><strong style="color:#3954A5;">PauPau Languages</strong></div>
-              <div>Instagram: <strong>@paupaulanguages</strong></div>
-            </div>
-          </td></tr>
-        </table>
-      </td></tr>
-    </table>
-  </center>
-</body>
-</html>`;
+    // -----------------------------------------------
+    // ========== CASO ESPECIAL: INTENSIVO 90 DÍAS ==========
+    // -----------------------------------------------
+    if (tipo_curso === "intensivo90") {
+      const htmlAlumno = `
+      <h2>¡Bienvenido/a al Curso Intensivo 90 Días! 🎉</h2>
+      <p>Hola ${alumnoNombre},</p>
+      <p>Gracias por inscribirte al <strong>Intensivo 90 Días</strong> de PauPau Languages.</p>
+      <p>En las próximas horas recibirás por correo toda la información del inicio del programa.</p>
+      <p>Tu profesora será <strong>Paula Toledo</strong> – Responsable Académica de PauPau.</p>
+      <p>¡Te esperamos! 🚀</p>`;
 
-      function escapeHTML(s) {
-        const map = {
-          "&": "&amp;",
-          "<": "&lt;",
-          ">": "&gt;",
-          '"': "&quot;",
-        };
-        return String(s ?? "").replace(/[&<>"]/g, (ch) => map[ch]);
+      const htmlAdmin = `
+      <h2>Nueva inscripción: Intensivo 90 Días</h2>
+      <ul>
+        <li><strong>Alumno:</strong> ${alumnoNombre} (${alumnoEmail})</li>
+        <li><strong>Programa:</strong> Intensivo 90 Días</li>
+        ${
+          pv?.whatsapp
+            ? `<li><strong>WhatsApp:</strong> ${pv.whatsapp}</li>`
+            : ""
+        }
+        ${
+          extraInfo
+            ? `<li><strong>Extra info:</strong> ${extraInfo}</li>`
+            : ""
+        }
+      </ul>`;
+
+      try {
+        // Enviamos al alumno
+        if (alumnoEmail) {
+          await transporter.sendMail({
+            from: FROM_EMAIL,
+            to: alumnoEmail,
+            subject: "¡Bienvenido al Intensivo 90 Días!",
+            html: htmlAlumno,
+          });
+        }
+
+        // Enviamos a administración + Paula
+        await transporter.sendMail({
+          from: FROM_EMAIL,
+          to: ACADEMY_EMAIL,
+          cc: "paauutooledo@gmail.com",
+          subject: `Nueva inscripción Intensivo 90 Días — ${alumnoNombre}`,
+          html: htmlAdmin,
+        });
+      } catch (e) {
+        console.error("[mail intensivo90] error envío", e);
       }
 
-      const adminHtml = `
-        <h2>Nueva inscripción confirmada</h2>
-        <ul>
-          <li><strong>Modalidad:</strong> grupal</li>
-          <li><strong>Alumno:</strong> ${escapeHTML(
-            alumnoNombre
-          )} (${escapeHTML(alumnoEmail)})</li>
-          <li><strong>Profesor:</strong> ${escapeHTML(profesorName)} ${
-        profEmail ? `(${escapeHTML(profEmail)})` : ""
-      }</li>
-          <li><strong>Horarios:</strong> ${escapeHTML(horariosTxt)}</li>
-          <li><strong>Reservas:</strong> (no aplica en grupales)</li>
-          ${
-            meta?.id
-              ? `<li><strong>MP Payment ID:</strong> ${escapeHTML(
-                  meta.id
-                )}</li>`
-              : ""
-          }
-        </ul>
+      return res.sendStatus(200);
+    }
 
-        <h3>Formulario</h3>
-        <ul>
-          <li><strong>nombre:</strong> ${escapeHTML(
-            meta?.form_preview?.nombre || alumnoNombre
-          )}</li>
-          <li><strong>DNI:</strong> ${escapeHTML(
-            meta?.form_preview?.dni || ""
-          )}</li>
-          <li><strong>fecha de nacimiento:</strong> ${escapeHTML(
-            meta?.form_preview?.nacimiento || ""
-          )}</li>
-          <li><strong>mail:</strong> ${escapeHTML(
-            meta?.form_preview?.email || alumnoEmail
-          )}</li>
-          <li><strong>whatsapp:</strong> ${escapeHTML(
-            meta?.form_preview?.whatsapp || ""
-          )}</li>
-          <li><strong>país donde vive:</strong> ${escapeHTML(
-            meta?.form_preview?.pais || ""
-          )}</li>
-          <li><strong>idioma a inscribirse:</strong> ${escapeHTML(
-            meta?.form_preview?.idioma || ""
-          )}</li>
-          <li><strong>resultado test nivelatorio:</strong> ${escapeHTML(
-            meta?.form_preview?.nivel || ""
-          )}</li>
-          <li><strong>clases por semana:</strong> ${escapeHTML(
-            meta?.form_preview?.frecuencia || ""
-          )}</li>
-          <li><strong>profesor:</strong> ${escapeHTML(
-            meta?.form_preview?.profesor || profesorName
-          )}</li>
-          <li><strong>horarios disponibles elegidos:</strong> ${escapeHTML(
-            horariosTxt
-          )}</li>
-          ${
-            extraInfo
-              ? `<li><strong>¿Algo que debamos saber para acompañarte mejor?</strong> ${escapeHTML(
-                  extraInfo
-                )}</li>`
-              : ""
-          }
-        </ul>
-      `;
+    // -----------------------------------------------
+    // ========== MODALIDAD GRUPAL (CLÁSICO) ==========
+    // -----------------------------------------------
+    if (modalidad === "grupal") {
+      const alumnoHtml = `
+      <h2>¡Bienvenido/a a PauPau Languages!</h2>
+      <p>Hola ${alumnoNombre},</p>
+      <p>Tu inscripción al grupo fue confirmada con éxito.</p>
+      <p><strong>Profesor/a:</strong> ${profesorName}</p>
+      <p><strong>Horario:</strong> ${horariosTxt}</p>
+      <p>En los próximos días recibirás el link de acceso.</p>
+      <p>¡Gracias por elegirnos! 💙</p>`;
+
+      const adminHtml = `
+      <h2>Nueva inscripción grupal</h2>
+      <ul>
+        <li><strong>Alumno:</strong> ${alumnoNombre} (${alumnoEmail})</li>
+        <li><strong>Profesor:</strong> ${profesorName}</li>
+        <li><strong>Horario:</strong> ${horariosTxt}</li>
+        ${
+          extraInfo
+            ? `<li><strong>Extra info:</strong> ${extraInfo}</li>`
+            : ""
+        }
+      </ul>`;
 
       try {
         if (alumnoEmail) {
           await transporter.sendMail({
             from: FROM_EMAIL,
             to: alumnoEmail,
-            subject: "¡Bienvenido/a a PauPau Languages!",
+            subject: "¡Tu inscripción fue confirmada!",
             html: alumnoHtml,
           });
         }
-        const toList = [ACADEMY_EMAIL].filter(Boolean);
-        const ccList = profEmail ? [profEmail] : [];
+
         await transporter.sendMail({
           from: FROM_EMAIL,
-          to: toList.join(","),
-          cc: ccList.join(",") || undefined,
-          subject: `Nueva inscripción confirmada (grupal): ${alumnoNombre} con ${profesorName}`,
+          to: ACADEMY_EMAIL,
+          cc: profEmail || undefined,
+          subject: `Nueva inscripción grupal — ${alumnoNombre}`,
           html: adminHtml,
         });
       } catch (e) {
-        console.error("[mail webhook grupal] fallo envío", e?.message);
+        console.error("[mail grupal] error envío", e);
       }
 
       return res.sendStatus(200);
     }
 
-    // ===== INDIVIDUAL =====
+    // -----------------------------------------------
+    // ========== INDIVIDUAL (NORMAL) ==========
+    // -----------------------------------------------
     const reservasIds = Array.isArray(meta?.reservas_ids)
       ? meta.reservas_ids.map(Number).filter(Boolean)
       : [];
@@ -1419,241 +1396,66 @@ app.post("/webhook", async (req, res) => {
        WHERE id = ANY($1::int[])`,
       [targetIds]
     );
-    console.log(`[webhook] Confirmadas reservas: ${targetIds.join(", ")}`);
 
-    if (transporter) {
-      const infoQ = `
-        SELECT r.id AS reserva_id,
-               r.alumno_nombre, r.alumno_email,
-               h.id AS horario_id, h.dia_semana, to_char(h.hora,'HH24:MI') AS hora,
-               p.nombre AS profesor
-        FROM reservas r
-        JOIN horarios h ON h.id = r.horario_id
-        JOIN profesores p ON p.id = h.profesor_id
-        WHERE r.id = ANY($1::int[])
-        ORDER BY p.nombre, ${DAY_ORDER}, h.hora
-      `;
-      const { rows } = await pool.query(infoQ, [targetIds]);
-      if (!rows.length) return res.sendStatus(200);
+    const infoQ = `
+      SELECT r.id AS reserva_id,
+             r.alumno_nombre, r.alumno_email,
+             h.id AS horario_id, h.dia_semana, to_char(h.hora,'HH24:MI') AS hora,
+             p.nombre AS profesor
+      FROM reservas r
+      JOIN horarios h ON h.id = r.horario_id
+      JOIN profesores p ON p.id = h.profesor_id
+      WHERE r.id = ANY($1::int[])
+      ORDER BY p.nombre, ${DAY_ORDER}, h.hora
+    `;
+    const { rows } = await pool.query(infoQ, [targetIds]);
+    if (!rows.length) return res.sendStatus(200);
 
-      const alumnoNombre = rows[0].alumno_nombre || "Alumno";
-      const alumnoEmail = rows[0].alumno_email || "";
-      const profesorName = rows[0].profesor || "Profesor";
-      const horariosTxt = rows
-        .map((r) => `${r.dia_semana} ${r.hora}`)
-        .join("; ");
-      const profEmail = PROF_EMAILS[profesorName] || "";
+    const alumnoNombre2 = rows[0].alumno_nombre || "Alumno";
+    const alumnoEmail2 = rows[0].alumno_email || "";
+    const profesorName2 = rows[0].profesor || "Profesor";
+    const horariosTxt2 = rows
+      .map((r) => `${r.dia_semana} ${r.hora}`)
+      .join("; ");
+    const profEmail2 =
+      PROF_EMAILS[profesorName2] ||
+      (profesorName2 === "Paula Toledo" ? "paauutooledo@gmail.com" : "");
 
-      const alumnoHtml = `<!doctype html>
-<html lang="es" style="margin:0;padding:0;">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width"/>
-  <title>Bienvenida PauPau Languages</title>
-  <style>
-    @media (max-width:600px){
-      .container{width:100% !important; margin:0 !important; border-radius:0 !important;}
-      .inner{padding:20px !important;}
-    }
-  </style>
-</head>
-<body style="margin:0; padding:0; background:#f6f7fb; -webkit-font-smoothing:antialiased; -moz-osx-font-smoothing:grayscale;">
-  <center style="width:100%; background:#f6f7fb; padding:24px 12px;">
-    <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" style="max-width:640px; margin:0 auto;" class="container">
-      <tr>
-        <td style="padding:0;">
-          <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" 
-                 style="background:#ffffff; border-radius:16px; overflow:hidden; box-shadow:0 8px 24px rgba(0,0,0,.08);">
-            <tr><td style="background:#3954A5; height:6px; font-size:0; line-height:0;">&nbsp;</td></tr>
-            <tr>
-              <td class="inner" style="padding:28px 28px 10px 28px; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Helvetica Neue', Arial, sans-serif; color:#222;">
-                <h1 style="margin:0 0 14px; font-size:22px; line-height:1.35;">¡Hola ${alumnoNombre}!</h1>
-                <p style="margin:0 0 10px; font-size:15px; line-height:1.6; color:#2a2f45;">¡Qué alegría que seas parte de nuestra Escuela! Estoy feliz de recibirte y darte la bienvenida.</p>
-                <p style="margin:0 0 18px; font-size:15px; line-height:1.6; color:#2a2f45;">En Paupau Languages, conectamos personas con el mundo y desde hoy vos también sos parte de esa comunidad.</p>
-                <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" 
-                       style="background:#f7f8ff; border:1px solid #e4e7ff; border-radius:12px; padding:14px; margin:6px 0 16px;">
-                  <tr>
-                    <td style="font-size:14px; line-height:1.6; color:#1d2340;">
-                      <div style="margin:0 0 8px;"><strong>Tu docente:</strong> ${profesorName}</div>
-                      <div style="margin:0 0 8px;"><strong>Tus horarios:</strong> ${horariosTxt} <span style="color:#5b64a5;">(hora Argentina)</span></div>
-                      <div style="margin:0 0 8px;"><strong>Profesor/tutor:</strong> ${profesorName}</div>
-                      <div style="margin:0;"><strong>Correo del profesor:</strong> ${profEmail || "(lo recibirás pronto)"}</div>
-                    </td>
-                  </tr>
-                </table>
-                <p style="margin:0 0 10px; font-size:15px; line-height:1.6; color:#2a2f45;">Te pedimos puntualidad y cámara/micrófono encendidos para una mejor experiencia.</p>
-                <p style="margin:0 0 18px; font-size:15px; line-height:1.6; color:#2a2f45;">Más cerca de la fecha de inicio tu docente te enviará los links de acceso.</p>
-                <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" 
-                       style="background:#fff8ee; border:1px solid #ffe2b9; border-radius:12px; padding:14px; margin:0 0 18px;">
-                  <tr>
-                    <td style="font-size:14px; line-height:1.6; color:#8a4a00;">
-                      <strong>Aranceles:</strong> Se abonan del 1 al 7 de cada mes por transferencia bancaria. 
-                      En caso de no abonar en tiempo y forma, las clases se suspenderán.
-                    </td>
-                  </tr>
-                </table>
-                <p style="margin:0 0 4px; font-size:14px; line-height:1.6; color:#4b4f66;">Si surge cualquier duda, escribinos cuando quieras.</p>
-              </td>
-            </tr>
-            <tr>
-              <td style="padding:18px 28px 26px; font-family:-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;">
-                <div style="font-size:13px; color:#707797; line-height:1.6;">
-                  <div style="margin:0 0 4px;"><strong style="color:#3954A5;">PauPau Languages</strong></div>
-                  <div>Instagram: <strong>@paupaulanguages</strong></div>
-                </div>
-              </td>
-            </tr>
-          </table>
-        </td>
-      </tr>
-    </table>
-  </center>
-</body>
-</html>`;
+    const htmlAlumno = `
+    <h2>¡Bienvenido/a!</h2>
+    <p>Hola ${alumnoNombre2}, tu inscripción fue confirmada.</p>
+    <p><strong>Profesor/a:</strong> ${profesorName2}</p>
+    <p><strong>Horarios:</strong> ${horariosTxt2}</p>
+    <p>Gracias por confiar en PauPau Languages 💙</p>`;
 
-      let formJson = {};
-      try {
-        const f = await pool.query(
-          `SELECT form_json FROM reservas WHERE id = $1 LIMIT 1`,
-          [targetIds[0]]
-        );
-        formJson = f?.rows?.[0]?.form_json || {};
-      } catch (_) {}
+    const adminHtml = `
+    <h2>Nueva inscripción individual</h2>
+    <ul>
+      <li><strong>Alumno:</strong> ${alumnoNombre2} (${alumnoEmail2})</li>
+      <li><strong>Profesor:</strong> ${profesorName2}</li>
+      <li><strong>Horarios:</strong> ${horariosTxt2}</li>
+      <li><strong>Reservas IDs:</strong> ${targetIds.join(", ")}</li>
+    </ul>`;
 
-      const pick = (obj, ...keys) =>
-        keys.map((k) => (obj && obj[k] != null ? String(obj[k]) : ""));
-      function formatDOB(f) {
-        if (f.nacimiento) return String(f.nacimiento);
-        const d = f["dob-dia"]
-          ? String(f["dob-dia"]).padStart(2, "0")
-          : "";
-        const m = f["dob-mes"]
-          ? String(f["dob-mes"]).padStart(2, "0")
-          : "";
-        const y = f["dob-anio"] ? String(f["dob-anio"]) : "";
-        if (y) return `${d || "01"}-${m || "01"}-${y}`;
-        return "";
-      }
-      function formatPhone(f) {
-        const cand = String(
-          f.whatsapp || f.telefono || f.phone || ""
-        ).trim();
-        return cand.includes("@") ? "" : cand;
-      }
-
-      function escapeHTML2(s) {
-        const map = {
-          "&": "&amp;",
-          "<": "&lt;",
-          ">": "&gt;",
-          '"': "&quot;",
-        };
-        return String(s ?? "").replace(/[&<>"]/g, (ch) => map[ch]);
-      }
-
-      const [
-        nombreForm,
-        dniForm,
-        emailForm,
-        paisForm,
-        idiomaForm,
-        nivelForm,
-        frecForm,
-        profForm,
-      ] = pick(
-        formJson,
-        "nombre",
-        "dni",
-        "email",
-        "pais",
-        "idioma",
-        "nivel",
-        "frecuencia",
-        "profesor"
-      );
-
-      const fechaNacForm = formatDOB(formJson);
-      const whatsappForm = formatPhone(formJson);
-      const extraInfo = String(formJson.extra_info || "").trim();
-
-      const adminHtml = `
-        <h2>Nueva inscripción confirmada</h2>
-        <ul>
-          <li><strong>Modalidad:</strong> individual</li>
-          <li><strong>Alumno:</strong> ${escapeHTML2(
-            alumnoNombre
-          )} (${escapeHTML2(alumnoEmail)})</li>
-          <li><strong>Profesor:</strong> ${escapeHTML2(profesorName)} ${
-        profEmail ? `(${escapeHTML2(profEmail)})` : ""
-      }</li>
-          <li><strong>Horarios:</strong> ${escapeHTML2(horariosTxt)}</li>
-          <li><strong>Reservas:</strong> ${targetIds.join(", ")}</li>
-          ${
-            meta?.id
-              ? `<li><strong>MP Payment ID:</strong> ${escapeHTML2(
-                  meta.id
-                )}</li>`
-              : ""
-          }
-        </ul>
-        <h3>Formulario</h3>
-        <ul>
-          <li><strong>nombre:</strong> ${escapeHTML2(
-            nombreForm || alumnoNombre
-          )}</li>
-          <li><strong>DNI:</strong> ${escapeHTML2(dniForm)}</li>
-          <li><strong>fecha de nacimiento:</strong> ${escapeHTML2(
-            fechaNacForm
-          )}</li>
-          <li><strong>mail:</strong> ${escapeHTML2(
-            emailForm || alumnoEmail
-          )}</li>
-          <li><strong>whatsapp:</strong> ${escapeHTML2(whatsappForm)}</li>
-          <li><strong>país donde vive:</strong> ${escapeHTML2(paisForm)}</li>
-          <li><strong>idioma a inscribirse:</strong> ${escapeHTML2(
-            idiomaForm
-          )}</li>
-          <li><strong>resultado test nivelatorio:</strong> ${escapeHTML2(
-            nivelForm
-          )}</li>
-          <li><strong>clases por semana:</strong> ${escapeHTML2(frecForm)}</li>
-          <li><strong>profesor:</strong> ${escapeHTML2(
-            profForm || profesorName
-          )}</li>
-          <li><strong>horarios disponibles elegidos:</strong> ${escapeHTML2(
-            horariosTxt
-          )}</li>
-          ${
-            extraInfo
-              ? `<li><strong>¿Algo que debamos saber para acompañarte mejor?</strong> ${escapeHTML2(
-                  extraInfo
-                )}</li>`
-              : ""
-          }
-        </ul>
-      `;
-
-      try {
-        if (alumnoEmail) {
-          await transporter.sendMail({
-            from: FROM_EMAIL,
-            to: alumnoEmail,
-            subject: "¡Bienvenido/a a PauPau Languages!",
-            html: alumnoHtml,
-          });
-        }
-        const toList = [ACADEMY_EMAIL].filter(Boolean);
-        const ccList = profEmail ? [profEmail] : [];
+    try {
+      if (alumnoEmail2) {
         await transporter.sendMail({
           from: FROM_EMAIL,
-          to: toList.join(","),
-          cc: ccList.join(",") || undefined,
-          subject: `Nueva inscripción confirmada: ${alumnoNombre} con ${profesorName}`,
-          html: adminHtml,
+          to: alumnoEmail2,
+          subject: "¡Inscripción confirmada!",
+          html: htmlAlumno,
         });
-      } catch (e) {
-        console.error("[mail webhook] fallo envío", e?.message);
       }
+
+      await transporter.sendMail({
+        from: FROM_EMAIL,
+        to: ACADEMY_EMAIL,
+        cc: profEmail2 || undefined,
+        subject: `Nueva inscripción individual — ${alumnoNombre2}`,
+        html: adminHtml,
+      });
+    } catch (err) {
+      console.error("[mail individual] error envío", err);
     }
 
     res.sendStatus(200);
@@ -1681,7 +1483,9 @@ setInterval(async () => {
   }
 }, 60 * 1000);
 
-// ----------- ADMIN (X-Admin-Key) ----------
+// ============================
+// ADMIN (X-Admin-Key)
+// ============================
 function requireAdmin(req, res, next) {
   const key = req.headers["x-admin-key"] || req.query.key;
   if (!key || key !== ADMIN_KEY)
@@ -1722,198 +1526,6 @@ app.post("/admin/profesores", requireAdmin, async (req, res) => {
     res.status(500).json({ error: "db_error" });
   }
 });
-
-// DELETE /admin/profesores/:id
-app.delete("/admin/profesores/:id", requireAdmin, async (req, res) => {
-  if (!pool) return res.status(500).json({ error: "db_not_configured" });
-  const id = Number(req.params.id);
-  if (!id) return res.status(400).json({ error: "bad_request" });
-  try {
-    const used = await pool.query(
-      `SELECT 1 FROM horarios WHERE profesor_id=$1 LIMIT 1`,
-      [id]
-    );
-    if (used.rowCount)
-      return res
-        .status(409)
-        .json({ error: "in_use", message: "El profesor tiene horarios" });
-    await pool.query(`DELETE FROM profesores WHERE id=$1`, [id]);
-    res.json({ ok: true });
-  } catch (e) {
-    console.error("[DELETE /admin/profesores/:id]", e);
-    res.status(500).json({ error: "db_error" });
-  }
-});
-
-// GET /admin/horarios
-app.get("/admin/horarios", requireAdmin, async (req, res) => {
-  if (!pool) return res.status(500).json({ error: "db_not_configured" });
-  const profesor_id = Number(req.query.profesor_id) || null;
-  try {
-    const params = [];
-    let where = "";
-    if (profesor_id) {
-      where = "WHERE h.profesor_id=$1";
-      params.push(profesor_id);
-    }
-    const q = `
-      SELECT h.id, h.profesor_id, p.nombre AS profesor, h.dia_semana, to_char(hora,'HH24:MI') AS hora,
-             ${STATE_CASE} AS estado,
-             ${HAS_PAGADO}, ${HAS_BLOQ}, ${HAS_PEND}
-      FROM horarios h
-      JOIN profesores p ON p.id = h.profesor_id
-      ${where}
-      ORDER BY p.nombre, ${DAY_ORDER}, h.hora
-    `;
-    const { rows } = await pool.query(q, params);
-    res.json(rows);
-  } catch (e) {
-    console.error("[GET /admin/horarios]", e);
-    res.status(500).json({ error: "db_error" });
-  }
-});
-
-// POST /admin/horarios
-app.post("/admin/horarios", requireAdmin, async (req, res) => {
-  if (!pool) return res.status(500).json({ error: "db_not_configured" });
-
-  const { profesor_id, dia_semana, hora } = req.body || {};
-  if (!profesor_id || !dia_semana || !hora) {
-    return res.status(400).json({
-      error: "bad_request",
-      message: "profesor_id, dia_semana, hora requeridos",
-    });
-  }
-  try {
-    const { rows } = await pool.query(
-      `INSERT INTO horarios (profesor_id, dia_semana, hora)
-       VALUES ($1,$2,$3::time)
-       RETURNING id, profesor_id, dia_semana, to_char(hora,'HH24:MI') AS hora`,
-      [profesor_id, dia_semana, hora]
-    );
-    res.json(rows[0]);
-  } catch (e) {
-    console.error("[POST /admin/horarios]", e);
-    res.status(500).json({ error: "db_error" });
-  }
-});
-
-// DELETE /admin/horarios/:id
-app.delete("/admin/horarios/:id", requireAdmin, async (req, res) => {
-  if (!pool) return res.status(500).json({ error: "db_not_configured" });
-
-  const id = Number(req.params.id);
-  if (!id) return res.status(400).json({ error: "bad_request" });
-  try {
-    const paid = await pool.query(
-      `SELECT 1 FROM reservas WHERE horario_id=$1 AND estado='pagado' LIMIT 1`,
-      [id]
-    );
-    if (paid.rowCount)
-      return res.status(409).json({
-        error: "paid",
-        message: "No puede eliminarse: ya está pagado",
-      });
-    await pool.query(`DELETE FROM horarios WHERE id=$1`, [id]);
-    res.json({ ok: true });
-  } catch (e) {
-    console.error("[DELETE /admin/horarios/:id]", e);
-    res.status(500).json({ error: "db_error" });
-  }
-});
-
-// POST /admin/horarios/:id/liberar
-app.post(
-  "/admin/horarios/:id/liberar",
-  requireAdmin,
-  async (req, res) => {
-    if (!pool) return res.status(500).json({ error: "db_not_configured" });
-    const id = Number(req.params.id);
-    if (!id) return res.status(400).json({ error: "bad_request" });
-    try {
-      await pool.query(
-        `UPDATE reservas SET estado='cancelado'
-         WHERE horario_id=$1 AND estado IN ('pendiente','bloqueado','pagado')`,
-        [id]
-      );
-      res.json({ ok: true });
-    } catch (e) {
-      console.error("[POST /admin/horarios/:id/liberar]", e);
-      res.status(500).json({ error: "db_error" });
-    }
-  }
-);
-
-// POST /admin/horarios/:id/estado
-app.post(
-  "/admin/horarios/:id/estado",
-  requireAdmin,
-  async (req, res) => {
-    if (!pool) return res.status(500).json({ error: "db_not_configured" });
-
-    const id = Number(req.params.id);
-    const { estado } = req.body || {};
-    if (!id || !estado)
-      return res.status(400).json({ error: "bad_request" });
-
-    try {
-      const paid = await pool.query(
-        `SELECT 1 FROM reservas WHERE horario_id=$1 AND estado='pagado' LIMIT 1`,
-        [id]
-      );
-      if (paid.rowCount && estado !== "disponible") {
-        return res.status(409).json({
-          error: "paid",
-          message: 'Cupo pagado: primero usá "Liberar cupo".',
-        });
-      }
-
-      if (estado === "disponible") {
-        await pool.query(
-          `UPDATE reservas SET estado='cancelado'
-           WHERE horario_id=$1 AND estado IN ('pendiente','bloqueado','pagado')`,
-          [id]
-        );
-        return res.json({ ok: true });
-      }
-
-      if (estado === "pendiente") {
-        await pool.query(
-          `UPDATE reservas SET estado='cancelado'
-           WHERE horario_id=$1 AND estado IN ('pendiente','bloqueado')`,
-          [id]
-        );
-        await pool.query(
-          `INSERT INTO reservas (horario_id, alumno_nombre, alumno_email, estado, reservado_hasta)
-           VALUES ($1,'ADMIN','admin@paupau.local','pendiente', now() + interval '24 hours')`,
-          [id]
-        );
-        return res.json({ ok: true });
-      }
-
-      if (estado === "bloqueado") {
-        await pool.query(
-          `UPDATE reservas SET estado='cancelado'
-           WHERE horario_id=$1 AND estado IN ('pendiente','bloqueado')`,
-          [id]
-        );
-        await pool.query(
-          `INSERT INTO reservas (horario_id, alumno_nombre, alumno_email, estado, reservado_hasta)
-           VALUES ($1,'ADMIN','admin@paupau.local','bloqueado', now() + interval '100 years')`,
-          [id]
-        );
-        return res.json({ ok: true });
-      }
-
-      return res
-        .status(400)
-        .json({ error: "bad_request", message: "estado inválido" });
-    } catch (e) {
-      console.error("[POST /admin/horarios/:id/estado]", e);
-      res.status(500).json({ error: "db_error" });
-    }
-  }
-);
 
 // ============================
 // START SERVER
