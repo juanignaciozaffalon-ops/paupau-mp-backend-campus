@@ -1263,40 +1263,34 @@ app.post("/webhook", async (req, res) => {
     if (evento?.data?.status && evento.data.status !== "approved")
       return res.sendStatus(200);
 
-    // -----------------------------------------------
+// -----------------------------------------------
 // DETECTAMOS MODALIDAD y TIPO CURSO
 // -----------------------------------------------
-const modalidad = String(meta7?.modalidad || "individual").toLowerCase();
+const modalidad = String(meta?.modalidad || "individual").toLowerCase();
 
-// Puede venir o no desde metadata. Lo normalizamos:
-let tipo_curso = meta7?.tipo_curso
-  ? String(meta7.tipo_curso).toLowerCase()
-  : null;
+// tipo_curso viene desde la metadata (lo setea /crear-preferencia)
+const tipo_curso =
+  meta?.tipo_curso && typeof meta.tipo_curso === "string"
+    ? meta.tipo_curso.toLowerCase()
+    : null;
 
-// ⚠️ CLAVE: si no vino tipo_curso pero la modalidad es "intensivo",
-// lo tratamos como el Intensivo 90 días
-if (!tipo_curso && modalidad === "intensivo") {
-  tipo_curso = "intensivo90";
-}
-
-// Para debug: podés ver esto en los logs de Render
+// Para debug: lo vas a ver en los logs de Render
 console.log(
   "[WEBHOOK] modalidad:", modalidad,
   "tipo_curso:", tipo_curso,
-  "meta:", JSON.stringify(meta7, null, 2)
+  "meta:", JSON.stringify(meta || {}, null, 2)
 );
 
 // Datos del alumno y profesor
-const alumnoNombre = meta7?.alumno_nombre || "Alumno";
-const alumnoEmail = meta7?.alumno_email || "";
-const profesorName = meta7?.teacher || "Profesor";
-const horariosTXT = meta7?.grupo_label || "";
-
+const alumnoNombre = meta?.alumno_nombre || "Alumno";
+const alumnoEmail  = meta?.alumno_email  || "";
+const profesorName = meta?.teacher       || "Profesor";
+const horariosTxt  = meta?.grupo_label   || "";
 const profEmail =
   PROF_EMAILS[profesorName] ||
   (profesorName === "Paula Toledo" ? "paauutooledo@gmail.com" : "");
 
-const pv = meta7?.form_preview || {};
+const pv        = meta?.form_preview || {};
 const extraInfo = (pv?.extra_info || "").trim();
 
     // -----------------------------------------------
