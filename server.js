@@ -1854,6 +1854,8 @@ async function liberarCupoHorario(horarioId) {
 
 // GET /admin/horarios  -> listado para el panel con filtro opcional
 app.get('/admin/horarios', requireAdmin, async (req, res) => {
+   console.log('*** NUEVO HANDLER /admin/horarios ***', req.query);   // 👈 AGREGÁ ESTO
+   
   if (!pool) {
     return res.status(500).json({ error: 'db_not_configured' });
   }
