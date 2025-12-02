@@ -1729,8 +1729,107 @@ app.post("/admin/profesores", requireAdmin, async (req, res) => {
     res.status(500).json({ error: "db_error" });
   }
 });
-app.listen(PORT, () => {
-  console.log(`🚀 Backend PauPau corriendo en puerto ${PORT}`);
+// ============================
+// ADMIN / HORARIOS (para admin-panel de Odoo)
+// ============================
+
+// GET /admin/horarios
+// Lista TODOS los horarios (el panel después filtra por día / profe)
+app.get("/admin/horarios", requireAdmin, async (req, res) => {
+  if (!pool) return res.status(500).json({ error: "db_not_configured" });
+
+  try {
+    const { rows } = await pool.query(
+      `
+      SELECT
+        h.id,
+        h.dia_semana,
+        to_char(h.hora,'HH24:MI') AS hora,
+        h.profesor_id,
+        p.nombre AS profesor
+      FROM horarios h
+      JOIN profesores p ON p.id = h.profesor_id
+      ORDER BY ${DAY_ORDER}, h.hora, p.nombre
+      `
+    );
+    res.json(rows);
+  } catch (e) {
+    console.error("[GET /admin/horarios]", e);
+    res.status(500).json({ error: "db_error" });
+  }
+});
+
+// POST /admin/horarios
+// Crea un horario nuevo desde el panel (día, hora, profe)
+app.post("/admin/horarios", requireAdmin, async (req, res) => {
+  if (!pool) return res.status(500).json({ error: "db_not_configured" });
+
+  const { profesor_id, dia_semana, hora } = req.body || {};
+
+  if (!profesor_id || !dia_semana || !hora) {
+    return res.status(400).json({
+      error: "bad_request",
+      message: "profesor_id, dia_semana y hora son obligatorios",
+    });
+  }
+
+  try {
+    const { rows } = await pool.query(
+      `
+      INSERT INTO horarios (profesor_id, dia_semana, hora)
+      VALUES ($1, $2, $3::time)
+      RETURNING id, profesor_id, dia_semana, to_char(hora,'HH24:MI') AS hora
+      `,
+      [Number(profesor_id), String(dia_semana), String(hora)]
+    );
+    res.json(rows[0]);
+  } catch (e) {
+    console.error("[POST /admin/horarios]", e);
+    res.status(500).json({ error: "db_error" });
+  }
+});
+
+// DELETE /admin/horarios/:id
+// Borrar horario desde el botón "Borrar" del panel
+app.delete("/admin/horarios/:id", requireAdmin, async (req, res) => {
+  if (!pool) return res.status(500).json({ error: "db_not_configured" });
+
+  const id = Number(req.params.id || 0);
+  if (!id) {
+    return res.status(400).json({
+      error: "bad_request",
+      message: "id de horario requerido",
+    });
+  }
+
+  try {
+    await pool.query(`DELETE FROM horarios WHERE id = $1`, [id]);
+    res.json({ ok: true });
+  } catch (e) {
+    console.error("[DELETE /admin/horarios/:id]", e);
+    res.status(500).json({ error: "db_error" });
+  }
+});
+
+// Por compatibilidad extra (por si el panel usa POST en vez de DELETE)
+app.post("/admin/horarios/delete", requireAdmin, async (req, res) => {
+  if (!pool) return res.status(500).json({ error: "db_not_configured" });
+
+  const id = Number((req.body && req.body.id) || 0);
+  if (!id) {
+    return res.status(400).json({
+      error: "bad_request",
+      message: "id de horario requerido",
+    });
+  }
+
+  try {
+    await pool.query(`DELETE FROM horarios WHERE id = $1`, [id]);
+    res.json({ ok: true });
+  } catch (e) {
+    console.error("[POST /admin/horarios/delete]", e);
+    res.status(500).json({ error: "db_error" });
+  }
 });
 
 // ============================
