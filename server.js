@@ -1873,11 +1873,11 @@ app.get('/admin/horarios', requireAdmin, async (req, res) => {
 
     const q = `
       SELECT
-        h.id          AS horario_id,
-        p.id          AS profesor_id,
-        p.nombre      AS profesor,
+        h.id AS id,                         -- 👈 IMPORTANTE: alias "id"
+        h.profesor_id,
+        p.nombre AS profesor,
         h.dia_semana,
-        to_char(h.hora, 'HH24:MI') AS hora,
+        to_char(h.hora,'HH24:MI') AS hora,
         ${STATE_CASE} AS estado,
         ${HAS_PAGADO},
         ${HAS_BLOQ},
@@ -1885,13 +1885,14 @@ app.get('/admin/horarios', requireAdmin, async (req, res) => {
       FROM horarios h
       JOIN profesores p ON p.id = h.profesor_id
       ${where}
-      ORDER BY p.nombre, ${DAY_ORDER}, h.hora;
+      ORDER BY p.nombre, ${DAY_ORDER}, h.hora
     `;
 
     const { rows } = await pool.query(q, params);
+    res.set('Cache-Control', 'no-store');   // que el panel siempre vea datos frescos
     return res.json(rows);
   } catch (e) {
-    console.error('GET /admin/horarios', e);
+    console.error('[GET /admin/horarios]', e);
     return res.status(500).json({ error: 'db_error' });
   }
 });
