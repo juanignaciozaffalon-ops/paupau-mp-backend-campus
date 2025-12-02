@@ -1857,17 +1857,28 @@ app.get("/admin/horarios", requireAdmin, async (req, res) => {
   if (!pool) return res.status(500).json({ error: "db_not_configured" });
 
   try {
-    const { dia, profesor_id } = req.query || {};
+    const { dia, profesor_id, profesor } = req.query || {};
     const params = [];
     let where = "WHERE 1=1";
 
+    // filtro por día (si viene)
     if (dia) {
       params.push(dia);
       where += ` AND h.dia_semana = $${params.length}`;
     }
-    if (profesor_id) {
-      params.push(Number(profesor_id));
-      where += ` AND p.id = $${params.length}`;
+
+    // aceptamos profesor_id O profesor (que puede ser id o nombre)
+    let profFilter = profesor_id || profesor || null;
+    if (profFilter) {
+      if (!isNaN(Number(profFilter))) {
+        // viene como ID numérico
+        params.push(Number(profFilter));
+        where += ` AND p.id = $${params.length}`;
+      } else {
+        // viene como nombre
+        params.push(String(profFilter));
+        where += ` AND p.nombre = $${params.length}`;
+      }
     }
 
     const q = `
