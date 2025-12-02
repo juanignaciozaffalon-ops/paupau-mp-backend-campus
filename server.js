@@ -1858,29 +1858,27 @@ app.get('/admin/horarios', requireAdmin, async (req, res) => {
     return res.status(500).json({ error: 'db_not_configured' });
   }
 
+  const profesor_id = Number(req.query.profesor_id) || null;
+
   try {
-    // Aceptamos tanto profesor_id como profesorId, por las dudas
-    const { profesor_id, profesorId } = req.query || {};
-    const pid = profesor_id || profesorId || null;
-
-    let where = '';
     const params = [];
+    let where = '';
 
-    if (pid) {
+    if (profesor_id) {
       where = 'WHERE h.profesor_id = $1';
-      params.push(Number(pid));
+      params.push(profesor_id);
     }
 
     const q = `
       SELECT
-        h.id AS id,                         -- 👈 IMPORTANTE: alias "id"
+        h.id,
         h.profesor_id,
         p.nombre AS profesor,
         h.dia_semana,
         to_char(h.hora,'HH24:MI') AS hora,
-        ${STATE_CASE} AS estado,
-        ${HAS_PAGADO},
-        ${HAS_BLOQ},
+        ${STATE_CASE}  AS estado,
+        ${HAS_PAGADO}, 
+        ${HAS_BLOQ}, 
         ${HAS_PEND}
       FROM horarios h
       JOIN profesores p ON p.id = h.profesor_id
@@ -1889,7 +1887,6 @@ app.get('/admin/horarios', requireAdmin, async (req, res) => {
     `;
 
     const { rows } = await pool.query(q, params);
-    res.set('Cache-Control', 'no-store');   // que el panel siempre vea datos frescos
     return res.json(rows);
   } catch (e) {
     console.error('[GET /admin/horarios]', e);
