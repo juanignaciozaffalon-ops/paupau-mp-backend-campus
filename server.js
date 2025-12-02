@@ -1852,42 +1852,32 @@ async function liberarCupoHorario(horarioId) {
   );
 }
 
-// GET /admin/horarios  -> listado que usa el admin panel
-app.get("/admin/horarios", requireAdmin, async (req, res) => {
-  if (!pool) return res.status(500).json({ error: "db_not_configured" });
+// GET /admin/horarios  -> listado para el panel con filtro opcional
+app.get('/admin/horarios', requireAdmin, async (req, res) => {
+  if (!pool) {
+    return res.status(500).json({ error: 'db_not_configured' });
+  }
 
   try {
-    const { dia, profesor_id, profesor } = req.query || {};
+    // Aceptamos tanto profesor_id como profesorId, por las dudas
+    const { profesor_id, profesorId } = req.query || {};
+    const pid = profesor_id || profesorId || null;
+
+    let where = '';
     const params = [];
-    let where = "WHERE 1=1";
 
-    // filtro por día (si viene)
-    if (dia) {
-      params.push(dia);
-      where += ` AND h.dia_semana = $${params.length}`;
-    }
-
-    // aceptamos profesor_id O profesor (que puede ser id o nombre)
-    let profFilter = profesor_id || profesor || null;
-    if (profFilter) {
-      if (!isNaN(Number(profFilter))) {
-        // viene como ID numérico
-        params.push(Number(profFilter));
-        where += ` AND p.id = $${params.length}`;
-      } else {
-        // viene como nombre
-        params.push(String(profFilter));
-        where += ` AND p.nombre = $${params.length}`;
-      }
+    if (pid) {
+      where = 'WHERE h.profesor_id = $1';
+      params.push(Number(pid));
     }
 
     const q = `
       SELECT
-        h.id AS horario_id,
-        p.id AS profesor_id,
-        p.nombre AS profesor,
+        h.id          AS horario_id,
+        p.id          AS profesor_id,
+        p.nombre      AS profesor,
         h.dia_semana,
-        to_char(h.hora,'HH24:MI') AS hora,
+        to_char(h.hora, 'HH24:MI') AS hora,
         ${STATE_CASE} AS estado,
         ${HAS_PAGADO},
         ${HAS_BLOQ},
@@ -1895,14 +1885,14 @@ app.get("/admin/horarios", requireAdmin, async (req, res) => {
       FROM horarios h
       JOIN profesores p ON p.id = h.profesor_id
       ${where}
-      ORDER BY p.nombre, ${DAY_ORDER}, h.hora
+      ORDER BY p.nombre, ${DAY_ORDER}, h.hora;
     `;
 
     const { rows } = await pool.query(q, params);
     return res.json(rows);
   } catch (e) {
-    console.error("[GET /admin/horarios]", e);
-    return res.status(500).json({ error: "db_error" });
+    console.error('GET /admin/horarios', e);
+    return res.status(500).json({ error: 'db_error' });
   }
 });
 
