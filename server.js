@@ -1831,6 +1831,132 @@ app.post("/admin/horarios/delete", requireAdmin, async (req, res) => {
     res.status(500).json({ error: "db_error" });
   }
 });
+// ============================
+// ADMIN HORARIOS (panel Odoo)
+// ============================
+
+// helper para liberar reservas de un horario
+async function liberarCupoHorario(horarioId) {
+  if (!pool) throw new Error("db_not_configured");
+
+  // marcamos como canceladas todas las reservas no pagadas de ese horario
+  await pool.query(
+    `
+      UPDATE reservas
+         SET estado = 'cancelado',
+             reservado_hasta = NULL
+       WHERE horario_id = $1
+         AND estado IN ('pendiente','bloqueado')
+    `,
+    [horarioId]
+  );
+}
+
+// GET /admin/horarios  -> listado que usa el admin panel
+app.get("/admin/horarios", requireAdmin, async (req, res) => {
+  if (!pool) return res.status(500).json({ error: "db_not_configured" });
+
+  try {
+    const { dia, profesor_id } = req.query || {};
+    const params = [];
+    let where = "WHERE 1=1";
+
+    if (dia) {
+      params.push(dia);
+      where += ` AND h.dia_semana = $${params.length}`;
+    }
+    if (profesor_id) {
+      params.push(Number(profesor_id));
+      where += ` AND p.id = $${params.length}`;
+    }
+
+    const q = `
+      SELECT
+        h.id AS horario_id,
+        p.id AS profesor_id,
+        p.nombre AS profesor,
+        h.dia_semana,
+        to_char(h.hora,'HH24:MI') AS hora,
+        ${STATE_CASE} AS estado,
+        ${HAS_PAGADO},
+        ${HAS_BLOQ},
+        ${HAS_PEND}
+      FROM horarios h
+      JOIN profesores p ON p.id = h.profesor_id
+      ${where}
+      ORDER BY p.nombre, ${DAY_ORDER}, h.hora
+    `;
+
+    const { rows } = await pool.query(q, params);
+    return res.json(rows);
+  } catch (e) {
+    console.error("[GET /admin/horarios]", e);
+    return res.status(500).json({ error: "db_error" });
+  }
+});
+
+// POST /admin/horarios  -> crear nuevo horario desde el panel
+app.post("/admin/horarios", requireAdmin, async (req, res) => {
+  if (!pool) return res.status(500).json({ error: "db_not_configured" });
+
+  const { profesor_id, dia_semana, hora } = req.body || {};
+  if (!profesor_id || !dia_semana || !hora) {
+    return res.status(400).json({
+      error: "bad_request",
+      message: "profesor_id, dia_semana y hora son requeridos",
+    });
+  }
+
+  try {
+    const { rows } = await pool.query(
+      `
+        INSERT INTO horarios (profesor_id, dia_semana, hora)
+        VALUES ($1, $2, $3::time)
+        RETURNING id AS horario_id,
+                  profesor_id,
+                  dia_semana,
+                  to_char(hora,'HH24:MI') AS hora
+      `,
+      [Number(profesor_id), String(dia_semana).trim(), hora]
+    );
+    return res.json(rows[0]);
+  } catch (e) {
+    console.error("[POST /admin/horarios]", e);
+    return res.status(500).json({ error: "db_error" });
+  }
+});
+
+// POST /admin/horarios/:id/liberar  -> botón "Liberar cupo" del panel
+app.post("/admin/horarios/:id/liberar", requireAdmin, async (req, res) => {
+  try {
+    const horarioId = Number(req.params.id);
+    if (!horarioId) {
+      return res.status(400).json({ error: "bad_request", message: "id inválido" });
+    }
+
+    await liberarCupoHorario(horarioId);
+    return res.json({ ok: true });
+  } catch (e) {
+    console.error("[POST /admin/horarios/:id/liberar]", e);
+    return res.status(500).json({ error: "db_error" });
+  }
+});
+
+// Alias por compatibilidad: algunos JS del panel llaman /horarios/:id/liberar
+app.post("/horarios/:id/liberar", requireAdmin, async (req, res) => {
+  try {
+    const horarioId = Number(req.params.id);
+    if (!horarioId) {
+      return res.status(400).json({ error: "bad_request", message: "id inválido" });
+    }
+
+    await liberarCupoHorario(horarioId);
+    return res.json({ ok: true });
+  } catch (e) {
+    console.error("[POST /horarios/:id/liberar]", e);
+    return res.status(500).json({ error: "db_error" });
+  }
+});
 
 // ============================
 // START SERVER
