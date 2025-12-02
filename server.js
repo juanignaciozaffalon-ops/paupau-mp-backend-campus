@@ -1236,6 +1236,7 @@ try {
   }
 });
 // ----------- WEBHOOK MP (inscripciones) ----------
+// ----------- WEBHOOK MP (inscripciones) ----------
 app.post("/webhook", async (req, res) => {
   if (!pool) {
     res.sendStatus(200);
@@ -1243,11 +1244,17 @@ app.post("/webhook", async (req, res) => {
   }
 
   const evento = req.body;
+
   try {
+    // =========================
+    // 1) OBTENEMOS PAYMENT & METADATA
+    // =========================
     let pagoId =
       evento?.data?.id || evento?.data?.payment?.id || null;
-    let meta = evento?.data?.metadata || evento?.data?.id?.metadata || null;
+    let meta =
+      evento?.data?.metadata || evento?.data?.id?.metadata || null;
 
+    // Si no vino metadata en el webhook, la buscamos con el payment id
     if (!meta && pagoId) {
       const pay = await mercadopago.payment
         .findById(pagoId)
@@ -1256,84 +1263,124 @@ app.post("/webhook", async (req, res) => {
       meta = body?.metadata || null;
     }
 
+    // Solo procesamos eventos de pago aprobados
     const isPayment =
       evento?.type === "payment" || evento?.action?.includes("payment");
     if (!isPayment) return res.sendStatus(200);
 
-    if (evento?.data?.status && evento.data.status !== "approved")
+    if (evento?.data?.status && evento.data.status !== "approved") {
       return res.sendStatus(200);
+    }
 
-// -----------------------------------------------
-// DETECTAMOS MODALIDAD y TIPO CURSO
-// -----------------------------------------------
-const modalidad = String(meta?.modalidad || "individual").toLowerCase();
+    // =========================
+    // 2) LEEMOS MODALIDAD / TIPO CURSO / FORM_PREVIEW
+    // =========================
+    const modalidad = String(meta?.modalidad || "individual").toLowerCase();
 
-// tipo_curso viene desde la metadata (lo setea /crear-preferencia)
-const tipo_curso =
-  meta?.tipo_curso && typeof meta.tipo_curso === "string"
-    ? meta.tipo_curso.toLowerCase()
-    : null;
+    const tipo_curso =
+      meta?.tipo_curso && typeof meta.tipo_curso === "string"
+        ? meta.tipo_curso.toLowerCase()
+        : null;
 
-// Para debug: lo vas a ver en los logs de Render
-console.log(
-  "[WEBHOOK] modalidad:", modalidad,
-  "tipo_curso:", tipo_curso,
-  "meta:", JSON.stringify(meta || {}, null, 2)
-);
+    const alumnoNombre = meta?.alumno_nombre || "Alumno";
+    const alumnoEmail = meta?.alumno_email || "";
+    const profesorName = meta?.teacher || "Profesor";
+    const horariosTxt = meta?.grupo_label || "";
 
-// Datos del alumno y profesor
-const alumnoNombre = meta?.alumno_nombre || "Alumno";
-const alumnoEmail  = meta?.alumno_email  || "";
-const profesorName = meta?.teacher       || "Profesor";
-const horariosTxt  = meta?.grupo_label   || "";
-const profEmail =
-  PROF_EMAILS[profesorName] ||
-  (profesorName === "Paula Toledo" ? "paauutooledo@gmail.com" : "");
+    const pv = meta?.form_preview || {};
+    const extraInfo = (pv?.extra_info || "").trim();
 
-const pv        = meta?.form_preview || {};
-const extraInfo = (pv?.extra_info || "").trim();
+    const profEmail =
+      PROF_EMAILS[profesorName] ||
+      (profesorName === "Paula Toledo" ? "paauutooledo@gmail.com" : "");
 
-    // -----------------------------------------------
-    // ========== CASO ESPECIAL: INTENSIVO 90 DÍAS ==========
-    // -----------------------------------------------
+    // Log para debug en Render
+    console.log(
+      "[WEBHOOK] modalidad:",
+      modalidad,
+      "tipo_curso:",
+      tipo_curso,
+      "meta:",
+      JSON.stringify(meta || {}, null, 2)
+    );
+
+    // =========================
+    // 3) CASO ESPECIAL: INTENSIVO 90 DÍAS
+    // =========================
     if (tipo_curso === "intensivo90" || modalidad === "intensivo") {
-  const htmlAlumno = `
-      <h2>¡Bienvenido/a al Curso Intensivo 90 Días! 🎉</h2>
-      <p>Hola ${alumnoNombre},</p>
-      <p>Gracias por inscribirte al <strong>Intensivo 90 Días</strong> de PauPau Languages.</p>
-      <p>En las próximas horas recibirás por correo toda la información del inicio del programa.</p>
-      <p>Tu profesora será <strong>Paula Toledo</strong> – Responsable Académica de PauPau.</p>
-      <p>¡Te esperamos! 🚀</p>`;
+      const htmlAlumno = `
+        <h2>¡Bienvenido/a al Curso Intensivo 90 Días! 🎉</h2>
+        <p>Hola ${alumnoNombre},</p>
+        <p>Gracias por inscribirte al <strong>Curso Intensivo 90 Días</strong> de PauPau Languages.</p>
+        <p>Estos son tus datos de inscripción:</p>
+        <ul>
+          ${pv.idioma ? `<li><strong>Idioma:</strong> ${pv.idioma}</li>` : ""}
+          ${pv.nivel ? `<li><strong>Nivel:</strong> ${pv.nivel}</li>` : ""}
+          ${
+            horariosTxt
+              ? `<li><strong>Grupo / Horario:</strong> ${horariosTxt}</li>`
+              : ""
+          }
+          ${
+            pv.frecuencia
+              ? `<li><strong>Frecuencia:</strong> ${pv.frecuencia} veces por semana</li>`
+              : ""
+          }
+          ${
+            pv.whatsapp
+              ? `<li><strong>WhatsApp:</strong> ${pv.whatsapp}</li>`
+              : ""
+          }
+        </ul>
+        <p>Tu profesora será <strong>Paula Toledo</strong>, Responsable Académica de PauPau.</p>
+        <p>En las próximas horas vas a recibir todos los detalles de inicio del programa (fechas, links y materiales).</p>
+        <p>¡Te esperamos para darle un impulso gigante a tu inglés! 🚀</p>
+      `;
 
       const htmlAdmin = `
-      <h2>Nueva inscripción: Intensivo 90 Días</h2>
-      <ul>
-        <li><strong>Alumno:</strong> ${alumnoNombre} (${alumnoEmail})</li>
-        <li><strong>Programa:</strong> Intensivo 90 Días</li>
-        ${
-          pv?.whatsapp
-            ? `<li><strong>WhatsApp:</strong> ${pv.whatsapp}</li>`
-            : ""
-        }
-        ${
-          extraInfo
-            ? `<li><strong>Extra info:</strong> ${extraInfo}</li>`
-            : ""
-        }
-      </ul>`;
+        <h2>Nueva inscripción: Intensivo 90 Días</h2>
+        <ul>
+          <li><strong>Alumno:</strong> ${alumnoNombre} (${alumnoEmail})</li>
+          ${
+            pv.pais
+              ? `<li><strong>País:</strong> ${pv.pais}</li>`
+              : ""
+          }
+          ${pv.idioma ? `<li><strong>Idioma:</strong> ${pv.idioma}</li>` : ""}
+          ${pv.nivel ? `<li><strong>Nivel:</strong> ${pv.nivel}</li>` : ""}
+          ${
+            horariosTxt
+              ? `<li><strong>Grupo / Horario:</strong> ${horariosTxt}</li>`
+              : ""
+          }
+          ${
+            pv.frecuencia
+              ? `<li><strong>Frecuencia:</strong> ${pv.frecuencia} veces por semana</li>`
+              : ""
+          }
+          ${
+            pv.whatsapp
+              ? `<li><strong>WhatsApp:</strong> ${pv.whatsapp}</li>`
+              : ""
+          }
+          ${
+            extraInfo
+              ? `<li><strong>Extra info:</strong> ${extraInfo}</li>`
+              : ""
+          }
+        </ul>
+      `;
 
       try {
-        // Enviamos al alumno
         if (alumnoEmail) {
           await transporter.sendMail({
             from: FROM_EMAIL,
             to: alumnoEmail,
-            subject: "¡Bienvenido al Intensivo 90 Días!",
+            subject: "¡Bienvenido al Intensivo 90 Días de PauPau! 🚀",
             html: htmlAlumno,
           });
         }
 
-        // Enviamos a administración + Paula
         await transporter.sendMail({
           from: FROM_EMAIL,
           to: ACADEMY_EMAIL,
@@ -1348,38 +1395,70 @@ const extraInfo = (pv?.extra_info || "").trim();
       return res.sendStatus(200);
     }
 
-    // -----------------------------------------------
-    // ========== MODALIDAD GRUPAL (CLÁSICO) ==========
-    // -----------------------------------------------
+    // =========================
+    // 4) MODALIDAD GRUPAL
+    // =========================
     if (modalidad === "grupal") {
       const alumnoHtml = `
-      <h2>¡Bienvenido/a a PauPau Languages!</h2>
-      <p>Hola ${alumnoNombre},</p>
-      <p>Tu inscripción al grupo fue confirmada con éxito.</p>
-      <p><strong>Profesor/a:</strong> ${profesorName}</p>
-      <p><strong>Horario:</strong> ${horariosTxt}</p>
-      <p>En los próximos días recibirás el link de acceso.</p>
-      <p>¡Gracias por elegirnos! 💙</p>`;
+        <h2>¡Bienvenido/a a PauPau Languages! 💙</h2>
+        <p>Hola ${alumnoNombre},</p>
+        <p>Tu inscripción al <strong>curso grupal</strong> fue confirmada con éxito.</p>
+        <p>Estos son los detalles de tu curso:</p>
+        <ul>
+          ${pv.idioma ? `<li><strong>Idioma:</strong> ${pv.idioma}</li>` : ""}
+          ${pv.nivel ? `<li><strong>Nivel:</strong> ${pv.nivel}</li>` : ""}
+          <li><strong>Profesor/a:</strong> ${profesorName}</li>
+          ${
+            horariosTxt
+              ? `<li><strong>Grupo / Horario:</strong> ${horariosTxt}</li>`
+              : ""
+          }
+          ${
+            pv.frecuencia
+              ? `<li><strong>Frecuencia:</strong> ${pv.frecuencia} veces por semana</li>`
+              : ""
+          }
+        </ul>
+        <p>En los próximos días recibirás por mail el link de Zoom y acceso al Campus PauPau.</p>
+        <p>¡Gracias por elegirnos para acompañar tu inglés! ✨</p>
+      `;
 
       const adminHtml = `
-      <h2>Nueva inscripción grupal</h2>
-      <ul>
-        <li><strong>Alumno:</strong> ${alumnoNombre} (${alumnoEmail})</li>
-        <li><strong>Profesor:</strong> ${profesorName}</li>
-        <li><strong>Horario:</strong> ${horariosTxt}</li>
-        ${
-          extraInfo
-            ? `<li><strong>Extra info:</strong> ${extraInfo}</li>`
-            : ""
-        }
-      </ul>`;
+        <h2>Nueva inscripción GRUPAL</h2>
+        <ul>
+          <li><strong>Alumno:</strong> ${alumnoNombre} (${alumnoEmail})</li>
+          <li><strong>Profesor/a:</strong> ${profesorName}</li>
+          ${
+            horariosTxt
+              ? `<li><strong>Grupo / Horario:</strong> ${horariosTxt}</li>`
+              : ""
+          }
+          ${pv.idioma ? `<li><strong>Idioma:</strong> ${pv.idioma}</li>` : ""}
+          ${pv.nivel ? `<li><strong>Nivel:</strong> ${pv.nivel}</li>` : ""}
+          ${
+            pv.frecuencia
+              ? `<li><strong>Frecuencia:</strong> ${pv.frecuencia}</li>`
+              : ""
+          }
+          ${
+            pv.whatsapp
+              ? `<li><strong>WhatsApp:</strong> ${pv.whatsapp}</li>`
+              : ""
+          }
+          ${
+            extraInfo
+              ? `<li><strong>Extra info:</strong> ${extraInfo}</li>`
+              : ""
+          }
+        </ul>
+      `;
 
       try {
         if (alumnoEmail) {
           await transporter.sendMail({
             from: FROM_EMAIL,
             to: alumnoEmail,
-            subject: "¡Tu inscripción fue confirmada!",
+            subject: "¡Tu inscripción grupal fue confirmada! 💙",
             html: alumnoHtml,
           });
         }
@@ -1398,9 +1477,9 @@ const extraInfo = (pv?.extra_info || "").trim();
       return res.sendStatus(200);
     }
 
-    // -----------------------------------------------
-    // ========== INDIVIDUAL (NORMAL) ==========
-    // -----------------------------------------------
+    // =========================
+    // 5) MODALIDAD INDIVIDUAL (CLÁSICA)
+    // =========================
     const reservasIds = Array.isArray(meta?.reservas_ids)
       ? meta.reservas_ids.map(Number).filter(Boolean)
       : [];
@@ -1437,38 +1516,80 @@ const extraInfo = (pv?.extra_info || "").trim();
     const { rows } = await pool.query(infoQ, [targetIds]);
     if (!rows.length) return res.sendStatus(200);
 
-    const alumnoNombre2 = rows[0].alumno_nombre || "Alumno";
-    const alumnoEmail2 = rows[0].alumno_email || "";
-    const profesorName2 = rows[0].profesor || "Profesor";
+    const alumnoNombre2 = rows[0].alumno_nombre || alumnoNombre || "Alumno";
+    const alumnoEmail2 = rows[0].alumno_email || alumnoEmail || "";
+    const profesorName2 = rows[0].profesor || profesorName || "Profesor";
     const horariosTxt2 = rows
       .map((r) => `${r.dia_semana} ${r.hora}`)
       .join("; ");
+
     const profEmail2 =
       PROF_EMAILS[profesorName2] ||
       (profesorName2 === "Paula Toledo" ? "paauutooledo@gmail.com" : "");
 
     const htmlAlumno = `
-    <h2>¡Bienvenido/a!</h2>
-    <p>Hola ${alumnoNombre2}, tu inscripción fue confirmada.</p>
-    <p><strong>Profesor/a:</strong> ${profesorName2}</p>
-    <p><strong>Horarios:</strong> ${horariosTxt2}</p>
-    <p>Gracias por confiar en PauPau Languages 💙</p>`;
+      <h2>¡Bienvenido/a a tus clases individuales de PauPau! 💙</h2>
+      <p>Hola ${alumnoNombre2},</p>
+      <p>Tu inscripción a clases <strong>individuales</strong> fue confirmada.</p>
+      <p>Estos son tus datos:</p>
+      <ul>
+        ${pv.idioma ? `<li><strong>Idioma:</strong> ${pv.idioma}</li>` : ""}
+        ${pv.nivel ? `<li><strong>Nivel:</strong> ${pv.nivel}</li>` : ""}
+        <li><strong>Profesor/a:</strong> ${profesorName2}</li>
+        <li><strong>Horarios:</strong> ${horariosTxt2}</li>
+        ${
+          pv.frecuencia
+            ? `<li><strong>Frecuencia:</strong> ${pv.frecuencia} veces por semana</li>`
+            : ""
+        }
+        ${
+          pv.whatsapp
+            ? `<li><strong>WhatsApp:</strong> ${pv.whatsapp}</li>`
+            : ""
+        }
+      </ul>
+      ${
+        extraInfo
+          ? `<p><strong>Extra info del alumno:</strong> ${extraInfo}</p>`
+          : ""
+      }
+      <p>En las próximas horas recibirás el acceso al Campus PauPau y al link de Zoom.</p>
+      <p>¡Gracias por elegirnos para acompañar tu camino con el inglés! ✨</p>
+    `;
 
     const adminHtml = `
-    <h2>Nueva inscripción individual</h2>
-    <ul>
-      <li><strong>Alumno:</strong> ${alumnoNombre2} (${alumnoEmail2})</li>
-      <li><strong>Profesor:</strong> ${profesorName2}</li>
-      <li><strong>Horarios:</strong> ${horariosTxt2}</li>
-      <li><strong>Reservas IDs:</strong> ${targetIds.join(", ")}</li>
-    </ul>`;
+      <h2>Nueva inscripción INDIVIDUAL</h2>
+      <ul>
+        <li><strong>Alumno:</strong> ${alumnoNombre2} (${alumnoEmail2})</li>
+        <li><strong>Profesor/a:</strong> ${profesorName2}</li>
+        <li><strong>Horarios:</strong> ${horariosTxt2}</li>
+        ${pv.idioma ? `<li><strong>Idioma:</strong> ${pv.idioma}</li>` : ""}
+        ${pv.nivel ? `<li><strong>Nivel:</strong> ${pv.nivel}</li>` : ""}
+        ${
+          pv.frecuencia
+            ? `<li><strong>Frecuencia:</strong> ${pv.frecuencia}</li>`
+            : ""
+        }
+        ${
+          pv.whatsapp
+            ? `<li><strong>WhatsApp:</strong> ${pv.whatsapp}</li>`
+            : ""
+        }
+        <li><strong>Reservas IDs:</strong> ${targetIds.join(", ")}</li>
+        ${
+          extraInfo
+            ? `<li><strong>Extra info:</strong> ${extraInfo}</li>`
+            : ""
+        }
+      </ul>
+    `;
 
     try {
       if (alumnoEmail2) {
         await transporter.sendMail({
           from: FROM_EMAIL,
           to: alumnoEmail2,
-          subject: "¡Inscripción confirmada!",
+          subject: "¡Tu inscripción individual fue confirmada! 💙",
           html: htmlAlumno,
         });
       }
