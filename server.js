@@ -1839,14 +1839,15 @@ app.post("/admin/horarios/delete", requireAdmin, async (req, res) => {
 async function liberarCupoHorario(horarioId) {
   if (!pool) throw new Error("db_not_configured");
 
-  // marcamos como canceladas todas las reservas no pagadas de ese horario
+  console.log('[liberarCupoHorario] Liberando cupo de horario', horarioId);
+
   await pool.query(
     `
       UPDATE reservas
          SET estado = 'cancelado',
              reservado_hasta = NULL
        WHERE horario_id = $1
-         AND estado IN ('pendiente','bloqueado')
+         AND estado IN ('pendiente','bloqueado','pagado')
     `,
     [horarioId]
   );
