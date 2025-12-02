@@ -1729,6 +1729,9 @@ app.post("/admin/profesores", requireAdmin, async (req, res) => {
     res.status(500).json({ error: "db_error" });
   }
 });
+app.listen(PORT, () => {
+  console.log(`🚀 Backend PauPau corriendo en puerto ${PORT}`);
+});
 
 // ============================
 // START SERVER
