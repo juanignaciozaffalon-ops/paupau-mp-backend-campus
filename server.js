@@ -1858,15 +1858,17 @@ app.get('/admin/horarios', requireAdmin, async (req, res) => {
     return res.status(500).json({ error: 'db_not_configured' });
   }
 
-  const profesor_id = Number(req.query.profesor_id) || null;
-
   try {
-    const params = [];
-    let where = '';
+    // aceptamos tanto profesor_id como profesorId por las dudas
+    const { profesor_id, profesorId } = req.query || {};
+    const pid = profesor_id || profesorId || null;
 
-    if (profesor_id) {
+    let where = '';
+    const params = [];
+
+    if (pid) {
       where = 'WHERE h.profesor_id = $1';
-      params.push(profesor_id);
+      params.push(Number(pid));
     }
 
     const q = `
@@ -1876,9 +1878,9 @@ app.get('/admin/horarios', requireAdmin, async (req, res) => {
         p.nombre AS profesor,
         h.dia_semana,
         to_char(h.hora,'HH24:MI') AS hora,
-        ${STATE_CASE}  AS estado,
-        ${HAS_PAGADO}, 
-        ${HAS_BLOQ}, 
+        ${STATE_CASE} AS estado,
+        ${HAS_PAGADO},
+        ${HAS_BLOQ},
         ${HAS_PEND}
       FROM horarios h
       JOIN profesores p ON p.id = h.profesor_id
