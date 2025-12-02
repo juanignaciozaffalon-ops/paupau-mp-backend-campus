@@ -1296,8 +1296,8 @@ const extraInfo = (pv?.extra_info || "").trim();
     // -----------------------------------------------
     // ========== CASO ESPECIAL: INTENSIVO 90 DÍAS ==========
     // -----------------------------------------------
-    if (tipo_curso === "intensivo90") {
-      const htmlAlumno = `
+    if (tipo_curso === "intensivo90" || modalidad === "intensivo") {
+  const htmlAlumno = `
       <h2>¡Bienvenido/a al Curso Intensivo 90 Días! 🎉</h2>
       <p>Hola ${alumnoNombre},</p>
       <p>Gracias por inscribirte al <strong>Intensivo 90 Días</strong> de PauPau Languages.</p>
