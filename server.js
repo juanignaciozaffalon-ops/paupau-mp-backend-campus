@@ -1157,37 +1157,48 @@ app.post("/crear-preferencia", async (req, res) => {
   }
 
   const form_preview = form
-    ? {
-        nombre: String(form.nombre || ""),
-        dni: String(form.dni || ""),
-        nacimiento: String(form.nacimiento || ""),
-        email: String(form.email || ""),
-        whatsapp: String(form.whatsapp || ""),
-        pais: String(form.pais || ""),
-        idioma: String(form.idioma || ""),
-        nivel: String(form.nivel || ""),
-        frecuencia: String(form.frecuencia || ""),
-        profesor: String(form.profesor || ""),
-        extra_info: String(form.extra_info || ""),
-        // Para el Intensivo 90 días podemos guardar también la sede/edición si la hubiera
-        programa: String(form.programa || form.program || ""),
-      }
-    : null;
+  ? {
+      nombre: String(form.nombre || ""),
+      dni: String(form.dni || ""),
+      nacimiento: String(form.nacimiento || ""),
+      email: String(form.email || ""),
+      whatsapp: String(form.whatsapp || ""),
+      pais: String(form.pais || ""),
+      idioma: String(form.idioma || ""),
+      nivel: String(form.nivel || ""),
+      frecuencia: String(form.frecuencia || ""),
+      profesor: String(form.profesor || ""),
+      extra_info: String(form.extra_info || ""),
+      // Acá guardamos lo que venga del front para identificar el programa
+      programa: String(form.programa || form.program || ""),
+    }
+  : null;
 
-  try {
-    const prefMetadata = {
-  ...metadata,
-  group_ref: groupRef,
-  reservas_ids: reservasIds,
-  alumno_nombre: name,
-  alumno_email: email,
-  modalidad,
-  // 👉 NUEVO: marca que es el curso intensivo
-  tipo_curso: form?.tipo_curso || metadata?.tipo_curso || null,
-  teacher: form?.profesor || metadata?.teacher || null,
-  grupo_label: form?.grupo_label || metadata?.grupo_label || null,
-  form_preview,
-};
+try {
+  // Detectamos tipo_curso a partir de "programa"
+  let tipoCurso = null;
+  const prog = form_preview?.programa?.toLowerCase() || "";
+
+  // Ajustá este if al valor REAL que mandás desde el front.
+  // Ejemplos posibles de prog:
+  //  - "intensivo90"
+  //  - "curso intensivo 90 días"
+  if (prog === "intensivo90" || prog.includes("intensivo 90")) {
+    tipoCurso = "intensivo90";
+  }
+
+  const prefMetadata = {
+    ...metadata,
+    group_ref: groupRef,
+    reservas_ids: reservasIds,
+    alumno_nombre: name,
+    alumno_email: email,
+    modalidad,
+    tipo_curso: tipoCurso,              // 👈 ahora siempre se setea bien
+    teacher: form?.profesor || metadata?.teacher || null,
+    grupo_label: form?.grupo_label || metadata?.grupo_label || null,
+    form_preview,
+  };
 
     const pref = {
       items: [
