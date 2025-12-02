@@ -1234,9 +1234,7 @@ try {
       details: e?.response?.body || null,
     });
   }
-});
-// ----------- WEBHOOK MP (inscripciones) ----------
-// ----------- WEBHOOK MP (inscripciones) ----------
+});// ----------- WEBHOOK MP (inscripciones) ----------
 app.post("/webhook", async (req, res) => {
   if (!pool) {
     res.sendStatus(200);
@@ -1246,15 +1244,13 @@ app.post("/webhook", async (req, res) => {
   const evento = req.body;
 
   try {
-    // =========================
-    // 1) OBTENEMOS PAYMENT & METADATA
-    // =========================
+    // ==========================
+    // 1) Leemos pago y metadata
+    // ==========================
     let pagoId =
       evento?.data?.id || evento?.data?.payment?.id || null;
-    let meta =
-      evento?.data?.metadata || evento?.data?.id?.metadata || null;
+    let meta = evento?.data?.metadata || evento?.data?.id?.metadata || null;
 
-    // Si no vino metadata en el webhook, la buscamos con el payment id
     if (!meta && pagoId) {
       const pay = await mercadopago.payment
         .findById(pagoId)
@@ -1263,7 +1259,6 @@ app.post("/webhook", async (req, res) => {
       meta = body?.metadata || null;
     }
 
-    // Solo procesamos eventos de pago aprobados
     const isPayment =
       evento?.type === "payment" || evento?.action?.includes("payment");
     if (!isPayment) return res.sendStatus(200);
@@ -1272,9 +1267,9 @@ app.post("/webhook", async (req, res) => {
       return res.sendStatus(200);
     }
 
-    // =========================
-    // 2) LEEMOS MODALIDAD / TIPO CURSO / FORM_PREVIEW
-    // =========================
+    // -----------------------------------------------
+    // 2) DETECTAMOS MODALIDAD / TIPO CURSO
+    // -----------------------------------------------
     const modalidad = String(meta?.modalidad || "individual").toLowerCase();
 
     const tipo_curso =
@@ -1282,101 +1277,222 @@ app.post("/webhook", async (req, res) => {
         ? meta.tipo_curso.toLowerCase()
         : null;
 
-    const alumnoNombre = meta?.alumno_nombre || "Alumno";
-    const alumnoEmail = meta?.alumno_email || "";
-    const profesorName = meta?.teacher || "Profesor";
-    const horariosTxt = meta?.grupo_label || "";
+    // Para debug: ver qué viene realmente
+    console.log(
+      "[WEBHOOK] modalidad:", modalidad,
+      "tipo_curso:", tipo_curso,
+      "meta:", JSON.stringify(meta || {}, null, 2)
+    );
 
-    const pv = meta?.form_preview || {};
-    const extraInfo = (pv?.extra_info || "").trim();
+    // Datos comunes del meta
+    const alumnoNombre = meta?.alumno_nombre || "Alumno";
+    const alumnoEmail  = meta?.alumno_email  || "";
+    const profesorName = meta?.teacher       || "Profesor";
+    const horariosTxt  = meta?.grupo_label   || "";
 
     const profEmail =
       PROF_EMAILS[profesorName] ||
       (profesorName === "Paula Toledo" ? "paauutooledo@gmail.com" : "");
 
-    // Log para debug en Render
-    console.log(
-      "[WEBHOOK] modalidad:",
-      modalidad,
-      "tipo_curso:",
-      tipo_curso,
-      "meta:",
-      JSON.stringify(meta || {}, null, 2)
-    );
+    const pv        = meta?.form_preview || {};
+    const extraInfo = (pv?.extra_info || "").trim();
 
-    // =========================
+    // ==================================================
+    // HELPERS DE PLANTILLAS HTML (alumno / admin)
+    // ==================================================
+
+    // Template “lindo” para alumno (como tu captura)
+    const buildAlumnoHtml = (nombre, profesor, horarios) => `
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <title>Bienvenida PauPau</title>
+</head>
+<body style="margin:0;padding:0;background:#0b0b10;font-family:system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;">
+  <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background:#0b0b10;padding:24px 0;">
+    <tr>
+      <td align="center">
+        <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="max-width:560px;background:#111827;border-radius:16px;border:1px solid #1f2937;overflow:hidden;">
+          <tr>
+            <td style="padding:24px 24px 16px 24px;background:linear-gradient(135deg,#4f46e5,#6366f1);">
+              <h1 style="margin:0;color:#f9fafb;font-size:24px;font-weight:700;">
+                ¡Hola ${nombre.split(" ")[0] || ""}!
+              </h1>
+            </td>
+          </tr>
+
+          <tr>
+            <td style="padding:24px;color:#e5e7eb;font-size:15px;line-height:1.6;">
+              <p style="margin:0 0 12px 0;">
+                ¡Qué alegría que seas parte de nuestra Escuela! Estoy feliz de recibirte y darte la bienvenida.
+              </p>
+              <p style="margin:0 0 20px 0;">
+                En Paupau Languages conectamos personas con el mundo y desde hoy vos también sos parte de esa comunidad.
+              </p>
+
+              <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="border-radius:14px;border:1px solid #374151;background:#111827;padding:16px 18px;margin-bottom:20px;">
+                <tr>
+                  <td style="font-size:14px;color:#e5e7eb;">
+                    <p style="margin:0 0 8px 0;">
+                      <strong>Tu docente:</strong> ${profesor}
+                    </p>
+                    <p style="margin:0 0 8px 0;">
+                      <strong>Tus horarios:</strong> ${horarios || "A confirmar"}
+                    </p>
+                    <p style="margin:0 0 8px 0;">
+                      <strong>Profesor/tutor:</strong> ${profesor}
+                    </p>
+                    ${
+                      profEmail
+                        ? `<p style="margin:0;">
+                             <strong>Correo del profesor:</strong>
+                             <a href="mailto:${profEmail}" style="color:#60a5fa;text-decoration:none;">
+                               ${profEmail}
+                             </a>
+                           </p>`
+                        : ""
+                    }
+                  </td>
+                </tr>
+              </table>
+
+              <p style="margin:0 0 16px 0;">
+                Te pedimos puntualidad y cámara/micrófono encendidos para una mejor experiencia.
+              </p>
+              <p style="margin:0 0 20px 0;">
+                Más cerca de la fecha de inicio tu docente te enviará los links de acceso.
+              </p>
+
+              <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="border-radius:14px;border:1px solid #92400e;background:#451a03;padding:14px 16px;margin-bottom:20px;">
+                <tr>
+                  <td style="font-size:14px;color:#fed7aa;">
+                    <strong>Aranceles:</strong>
+                    Se abonan del 1 al 7 de cada mes por transferencia bancaria.
+                    En caso de no abonar en tiempo y forma, las clases se suspenderán.
+                  </td>
+                </tr>
+              </table>
+
+              <p style="margin:0 0 6px 0;">
+                Si surge cualquier duda, escribinos cuando quieras.
+              </p>
+
+              <p style="margin:16px 0 0 0;font-size:14px;color:#9ca3af;">
+                <strong style="color:#e5e7eb;">PauPau Languages</strong><br/>
+                Instagram:
+                <a href="https://www.instagram.com/paupaulanguages" style="color:#60a5fa;text-decoration:none;">
+                  @paupaulanguages
+                </a>
+              </p>
+            </td>
+          </tr>
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>`.trim();
+
+    // Template para admin/profe (con formulario)
+    const buildAdminHtml = ({
+      modalidad,
+      alumnoNombre,
+      alumnoEmail,
+      profesorName,
+      profEmail,
+      horariosTxt,
+      reservasIds,
+      pv,
+    }) => {
+      const rowsForm = [];
+
+      if (pv?.nombre)      rowsForm.push(`<li><strong>nombre:</strong> ${pv.nombre}</li>`);
+      if (pv?.dni)         rowsForm.push(`<li><strong>DNI:</strong> ${pv.dni}</li>`);
+      if (pv?.nacimiento)  rowsForm.push(`<li><strong>fecha de nacimiento:</strong> ${pv.nacimiento}</li>`);
+      if (pv?.email)       rowsForm.push(`<li><strong>mail:</strong> <a href="mailto:${pv.email}">${pv.email}</a></li>`);
+      if (pv?.whatsapp)    rowsForm.push(`<li><strong>whatsapp:</strong> ${pv.whatsapp}</li>`);
+      if (pv?.pais)        rowsForm.push(`<li><strong>país donde vive:</strong> ${pv.pais}</li>`);
+      if (pv?.idioma)      rowsForm.push(`<li><strong>idioma a inscribirse:</strong> ${pv.idioma}</li>`);
+      if (pv?.nivel)       rowsForm.push(`<li><strong>resultado test nivelatorio:</strong> ${pv.nivel}</li>`);
+      if (pv?.frecuencia)  rowsForm.push(`<li><strong>clases por semana:</strong> ${pv.frecuencia}</li>`);
+      if (pv?.profesor)    rowsForm.push(`<li><strong>profesor:</strong> ${pv.profesor}</li>`);
+      if (pv?.programa)    rowsForm.push(`<li><strong>programa:</strong> ${pv.programa}</li>`);
+      if (pv?.extra_info)  rowsForm.push(`<li><strong>extra_info:</strong> ${pv.extra_info}</li>`);
+
+      return `
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <title>Nueva inscripción confirmada</title>
+</head>
+<body style="margin:0;padding:16px;background:#111827;font-family:system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;color:#e5e7eb;">
+  <h2 style="margin-top:0;margin-bottom:8px;">Nueva <span style="background:#facc15;color:#111827;padding:2px 6px;border-radius:4px;">inscripción</span> confirmada</h2>
+  <p style="margin-top:0;margin-bottom:18px;font-size:14px;color:#9ca3af;">
+    Modalidad: <strong>${modalidad}</strong>
+  </p>
+
+  <ul style="margin:0 0 18px 18px;padding:0;font-size:14px;line-height:1.6;">
+    <li><strong>Modalidad:</strong> ${modalidad}</li>
+    <li><strong>Alumno:</strong> ${alumnoNombre}${
+      alumnoEmail
+        ? ` (<a href="mailto:${alumnoEmail}" style="color:#60a5fa;">${alumnoEmail}</a>)`
+        : ""
+    }</li>
+    <li><strong>Profesor:</strong> ${profesorName}${
+      profEmail
+        ? ` (<a href="mailto:${profEmail}" style="color:#60a5fa;">${profEmail}</a>)`
+        : ""
+    }</li>
+    ${horariosTxt ? `<li><strong>Horarios:</strong> ${horariosTxt}</li>` : ""}
+    ${
+      reservasIds && reservasIds.length
+        ? `<li><strong>Reservas:</strong> ${reservasIds.join(", ")}</li>`
+        : ""
+    }
+  </ul>
+
+  ${
+    rowsForm.length
+      ? `
+  <h3 style="margin:12px 0 6px 0;">Formulario</h3>
+  <ul style="margin:0 0 8px 18px;padding:0;font-size:14px;line-height:1.6;">
+    ${rowsForm.join("\n    ")}
+  </ul>`
+      : ""
+  }
+</body>
+</html>`.trim();
+    };
+
+    // ===========================================
     // 3) CASO ESPECIAL: INTENSIVO 90 DÍAS
-    // =========================
+    // ===========================================
     if (tipo_curso === "intensivo90" || modalidad === "intensivo") {
       const htmlAlumno = `
         <h2>¡Bienvenido/a al Curso Intensivo 90 Días! 🎉</h2>
         <p>Hola ${alumnoNombre},</p>
-        <p>Gracias por inscribirte al <strong>Curso Intensivo 90 Días</strong> de PauPau Languages.</p>
-        <p>Estos son tus datos de inscripción:</p>
-        <ul>
-          ${pv.idioma ? `<li><strong>Idioma:</strong> ${pv.idioma}</li>` : ""}
-          ${pv.nivel ? `<li><strong>Nivel:</strong> ${pv.nivel}</li>` : ""}
-          ${
-            horariosTxt
-              ? `<li><strong>Grupo / Horario:</strong> ${horariosTxt}</li>`
-              : ""
-          }
-          ${
-            pv.frecuencia
-              ? `<li><strong>Frecuencia:</strong> ${pv.frecuencia} veces por semana</li>`
-              : ""
-          }
-          ${
-            pv.whatsapp
-              ? `<li><strong>WhatsApp:</strong> ${pv.whatsapp}</li>`
-              : ""
-          }
-        </ul>
-        <p>Tu profesora será <strong>Paula Toledo</strong>, Responsable Académica de PauPau.</p>
-        <p>En las próximas horas vas a recibir todos los detalles de inicio del programa (fechas, links y materiales).</p>
-        <p>¡Te esperamos para darle un impulso gigante a tu inglés! 🚀</p>
-      `;
+        <p>Gracias por inscribirte al <strong>Intensivo 90 Días</strong> de PauPau Languages.</p>
+        <p>En las próximas horas recibirás por correo toda la información del inicio del programa.</p>
+        <p>Tu profesora será <strong>Paula Toledo</strong> – Responsable Académica de PauPau.</p>
+        <p>¡Te esperamos! 🚀</p>`;
 
       const htmlAdmin = `
         <h2>Nueva inscripción: Intensivo 90 Días</h2>
         <ul>
           <li><strong>Alumno:</strong> ${alumnoNombre} (${alumnoEmail})</li>
-          ${
-            pv.pais
-              ? `<li><strong>País:</strong> ${pv.pais}</li>`
-              : ""
-          }
-          ${pv.idioma ? `<li><strong>Idioma:</strong> ${pv.idioma}</li>` : ""}
-          ${pv.nivel ? `<li><strong>Nivel:</strong> ${pv.nivel}</li>` : ""}
-          ${
-            horariosTxt
-              ? `<li><strong>Grupo / Horario:</strong> ${horariosTxt}</li>`
-              : ""
-          }
-          ${
-            pv.frecuencia
-              ? `<li><strong>Frecuencia:</strong> ${pv.frecuencia} veces por semana</li>`
-              : ""
-          }
-          ${
-            pv.whatsapp
-              ? `<li><strong>WhatsApp:</strong> ${pv.whatsapp}</li>`
-              : ""
-          }
-          ${
-            extraInfo
-              ? `<li><strong>Extra info:</strong> ${extraInfo}</li>`
-              : ""
-          }
-        </ul>
-      `;
+          <li><strong>Programa:</strong> Intensivo 90 Días</li>
+          ${pv?.whatsapp ? `<li><strong>WhatsApp:</strong> ${pv.whatsapp}</li>` : ""}
+          ${extraInfo ? `<li><strong>Extra info:</strong> ${extraInfo}</li>` : ""}
+        </ul>`;
 
       try {
         if (alumnoEmail) {
           await transporter.sendMail({
             from: FROM_EMAIL,
             to: alumnoEmail,
-            subject: "¡Bienvenido al Intensivo 90 Días de PauPau! 🚀",
+            subject: "¡Bienvenido al Intensivo 90 Días!",
             html: htmlAlumno,
           });
         }
@@ -1395,70 +1511,33 @@ app.post("/webhook", async (req, res) => {
       return res.sendStatus(200);
     }
 
-    // =========================
+    // ===========================================
     // 4) MODALIDAD GRUPAL
-    // =========================
+    // ===========================================
     if (modalidad === "grupal") {
-      const alumnoHtml = `
-        <h2>¡Bienvenido/a a PauPau Languages! 💙</h2>
-        <p>Hola ${alumnoNombre},</p>
-        <p>Tu inscripción al <strong>curso grupal</strong> fue confirmada con éxito.</p>
-        <p>Estos son los detalles de tu curso:</p>
-        <ul>
-          ${pv.idioma ? `<li><strong>Idioma:</strong> ${pv.idioma}</li>` : ""}
-          ${pv.nivel ? `<li><strong>Nivel:</strong> ${pv.nivel}</li>` : ""}
-          <li><strong>Profesor/a:</strong> ${profesorName}</li>
-          ${
-            horariosTxt
-              ? `<li><strong>Grupo / Horario:</strong> ${horariosTxt}</li>`
-              : ""
-          }
-          ${
-            pv.frecuencia
-              ? `<li><strong>Frecuencia:</strong> ${pv.frecuencia} veces por semana</li>`
-              : ""
-          }
-        </ul>
-        <p>En los próximos días recibirás por mail el link de Zoom y acceso al Campus PauPau.</p>
-        <p>¡Gracias por elegirnos para acompañar tu inglés! ✨</p>
-      `;
+      const alumnoHtml = buildAlumnoHtml(
+        alumnoNombre,
+        profesorName,
+        horariosTxt
+      );
 
-      const adminHtml = `
-        <h2>Nueva inscripción GRUPAL</h2>
-        <ul>
-          <li><strong>Alumno:</strong> ${alumnoNombre} (${alumnoEmail})</li>
-          <li><strong>Profesor/a:</strong> ${profesorName}</li>
-          ${
-            horariosTxt
-              ? `<li><strong>Grupo / Horario:</strong> ${horariosTxt}</li>`
-              : ""
-          }
-          ${pv.idioma ? `<li><strong>Idioma:</strong> ${pv.idioma}</li>` : ""}
-          ${pv.nivel ? `<li><strong>Nivel:</strong> ${pv.nivel}</li>` : ""}
-          ${
-            pv.frecuencia
-              ? `<li><strong>Frecuencia:</strong> ${pv.frecuencia}</li>`
-              : ""
-          }
-          ${
-            pv.whatsapp
-              ? `<li><strong>WhatsApp:</strong> ${pv.whatsapp}</li>`
-              : ""
-          }
-          ${
-            extraInfo
-              ? `<li><strong>Extra info:</strong> ${extraInfo}</li>`
-              : ""
-          }
-        </ul>
-      `;
+      const adminHtml = buildAdminHtml({
+        modalidad: "grupal",
+        alumnoNombre,
+        alumnoEmail,
+        profesorName,
+        profEmail,
+        horariosTxt,
+        reservasIds: [],
+        pv,
+      });
 
       try {
         if (alumnoEmail) {
           await transporter.sendMail({
             from: FROM_EMAIL,
             to: alumnoEmail,
-            subject: "¡Tu inscripción grupal fue confirmada! 💙",
+            subject: "¡Tu inscripción fue confirmada!",
             html: alumnoHtml,
           });
         }
@@ -1477,15 +1556,16 @@ app.post("/webhook", async (req, res) => {
       return res.sendStatus(200);
     }
 
-    // =========================
-    // 5) MODALIDAD INDIVIDUAL (CLÁSICA)
-    // =========================
-    const reservasIds = Array.isArray(meta?.reservas_ids)
+    // ===========================================
+    // 5) MODALIDAD INDIVIDUAL (NORMAL)
+    // ===========================================
+    const reservasIdsMeta = Array.isArray(meta?.reservas_ids)
       ? meta.reservas_ids.map(Number).filter(Boolean)
       : [];
     const groupRef = meta?.group_ref || null;
 
-    let targetIds = reservasIds;
+    let targetIds = reservasIdsMeta;
+
     if (!targetIds.length && groupRef) {
       const r = await pool.query(
         `SELECT id FROM reservas WHERE group_ref = $1`,
@@ -1493,7 +1573,10 @@ app.post("/webhook", async (req, res) => {
       );
       targetIds = r.rows.map((x) => x.id);
     }
-    if (!targetIds.length) return res.sendStatus(200);
+
+    if (!targetIds.length) {
+      return res.sendStatus(200);
+    }
 
     await pool.query(
       `UPDATE reservas
@@ -1514,82 +1597,42 @@ app.post("/webhook", async (req, res) => {
       ORDER BY p.nombre, ${DAY_ORDER}, h.hora
     `;
     const { rows } = await pool.query(infoQ, [targetIds]);
-    if (!rows.length) return res.sendStatus(200);
+    if (!rows.length) {
+      return res.sendStatus(200);
+    }
 
-    const alumnoNombre2 = rows[0].alumno_nombre || alumnoNombre || "Alumno";
-    const alumnoEmail2 = rows[0].alumno_email || alumnoEmail || "";
-    const profesorName2 = rows[0].profesor || profesorName || "Profesor";
-    const horariosTxt2 = rows
-      .map((r) => `${r.dia_semana} ${r.hora}`)
-      .join("; ");
+    const alumnoNombre2 = rows[0].alumno_nombre || "Alumno";
+    const alumnoEmail2  = rows[0].alumno_email || "";
+    const profesorName2 = rows[0].profesor || "Profesor";
+    const horariosTxt2  = rows.map((r) => `${r.dia_semana} ${r.hora}`).join("; ");
 
     const profEmail2 =
       PROF_EMAILS[profesorName2] ||
       (profesorName2 === "Paula Toledo" ? "paauutooledo@gmail.com" : "");
 
-    const htmlAlumno = `
-      <h2>¡Bienvenido/a a tus clases individuales de PauPau! 💙</h2>
-      <p>Hola ${alumnoNombre2},</p>
-      <p>Tu inscripción a clases <strong>individuales</strong> fue confirmada.</p>
-      <p>Estos son tus datos:</p>
-      <ul>
-        ${pv.idioma ? `<li><strong>Idioma:</strong> ${pv.idioma}</li>` : ""}
-        ${pv.nivel ? `<li><strong>Nivel:</strong> ${pv.nivel}</li>` : ""}
-        <li><strong>Profesor/a:</strong> ${profesorName2}</li>
-        <li><strong>Horarios:</strong> ${horariosTxt2}</li>
-        ${
-          pv.frecuencia
-            ? `<li><strong>Frecuencia:</strong> ${pv.frecuencia} veces por semana</li>`
-            : ""
-        }
-        ${
-          pv.whatsapp
-            ? `<li><strong>WhatsApp:</strong> ${pv.whatsapp}</li>`
-            : ""
-        }
-      </ul>
-      ${
-        extraInfo
-          ? `<p><strong>Extra info del alumno:</strong> ${extraInfo}</p>`
-          : ""
-      }
-      <p>En las próximas horas recibirás el acceso al Campus PauPau y al link de Zoom.</p>
-      <p>¡Gracias por elegirnos para acompañar tu camino con el inglés! ✨</p>
-    `;
+    const htmlAlumno = buildAlumnoHtml(
+      alumnoNombre2,
+      profesorName2,
+      horariosTxt2
+    );
 
-    const adminHtml = `
-      <h2>Nueva inscripción INDIVIDUAL</h2>
-      <ul>
-        <li><strong>Alumno:</strong> ${alumnoNombre2} (${alumnoEmail2})</li>
-        <li><strong>Profesor/a:</strong> ${profesorName2}</li>
-        <li><strong>Horarios:</strong> ${horariosTxt2}</li>
-        ${pv.idioma ? `<li><strong>Idioma:</strong> ${pv.idioma}</li>` : ""}
-        ${pv.nivel ? `<li><strong>Nivel:</strong> ${pv.nivel}</li>` : ""}
-        ${
-          pv.frecuencia
-            ? `<li><strong>Frecuencia:</strong> ${pv.frecuencia}</li>`
-            : ""
-        }
-        ${
-          pv.whatsapp
-            ? `<li><strong>WhatsApp:</strong> ${pv.whatsapp}</li>`
-            : ""
-        }
-        <li><strong>Reservas IDs:</strong> ${targetIds.join(", ")}</li>
-        ${
-          extraInfo
-            ? `<li><strong>Extra info:</strong> ${extraInfo}</li>`
-            : ""
-        }
-      </ul>
-    `;
+    const adminHtml = buildAdminHtml({
+      modalidad: "individual",
+      alumnoNombre: alumnoNombre2,
+      alumnoEmail: alumnoEmail2,
+      profesorName: profesorName2,
+      profEmail: profEmail2,
+      horariosTxt: horariosTxt2,
+      reservasIds: targetIds,
+      pv,
+    });
 
     try {
       if (alumnoEmail2) {
         await transporter.sendMail({
           from: FROM_EMAIL,
           to: alumnoEmail2,
-          subject: "¡Tu inscripción individual fue confirmada! 💙",
+          subject: "¡Inscripción confirmada!",
           html: htmlAlumno,
         });
       }
@@ -1598,17 +1641,17 @@ app.post("/webhook", async (req, res) => {
         from: FROM_EMAIL,
         to: ACADEMY_EMAIL,
         cc: profEmail2 || undefined,
-        subject: `Nueva inscripción individual — ${alumnoNombre2}`,
+        subject: `Nueva inscripción confirmada: ${alumnoNombre2} con ${profesorName2}`,
         html: adminHtml,
       });
     } catch (err) {
       console.error("[mail individual] error envío", err);
     }
 
-    res.sendStatus(200);
+    return res.sendStatus(200);
   } catch (e) {
     console.error("[webhook] error", e);
-    res.sendStatus(200);
+    return res.sendStatus(200);
   }
 });
 
