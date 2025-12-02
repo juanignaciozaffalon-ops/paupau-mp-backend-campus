@@ -1469,47 +1469,60 @@ app.post("/webhook", async (req, res) => {
     // ===========================================
     // 3) CASO ESPECIAL: INTENSIVO 90 DÍAS
     // ===========================================
-    if (tipo_curso === "intensivo90" || modalidad === "intensivo") {
-      const htmlAlumno = `
-        <h2>¡Bienvenido/a al Curso Intensivo 90 Días! 🎉</h2>
-        <p>Hola ${alumnoNombre},</p>
-        <p>Gracias por inscribirte al <strong>Intensivo 90 Días</strong> de PauPau Languages.</p>
-        <p>En las próximas horas recibirás por correo toda la información del inicio del programa.</p>
-        <p>Tu profesora será <strong>Paula Toledo</strong> – Responsable Académica de PauPau.</p>
-        <p>¡Te esperamos! 🚀</p>`;
+    // ===========================================
+// 3) CASO ESPECIAL: INTENSIVO 90 DÍAS
+// ===========================================
+if (tipo_curso === "intensivo90" || modalidad === "intensivo") {
+  // Armamos un texto de horarios “humano” para el intensivo
+  const horariosIntensivo =
+    pv?.grupo_label ||
+    meta?.grupo_label ||
+    "Intensivo 90 Días – horarios a coordinar con Paula";
 
-      const htmlAdmin = `
-        <h2>Nueva inscripción: Intensivo 90 Días</h2>
-        <ul>
-          <li><strong>Alumno:</strong> ${alumnoNombre} (${alumnoEmail})</li>
-          <li><strong>Programa:</strong> Intensivo 90 Días</li>
-          ${pv?.whatsapp ? `<li><strong>WhatsApp:</strong> ${pv.whatsapp}</li>` : ""}
-          ${extraInfo ? `<li><strong>Extra info:</strong> ${extraInfo}</li>` : ""}
-        </ul>`;
+  // 🌈 MISMO FORMATO LINDO QUE INDIVIDUAL/GRUPAL (para el alumno)
+  const htmlAlumno = buildAlumnoHtml(
+    alumnoNombre,
+    "Paula Toledo",
+    horariosIntensivo
+  );
 
-      try {
-        if (alumnoEmail) {
-          await transporter.sendMail({
-            from: FROM_EMAIL,
-            to: alumnoEmail,
-            subject: "¡Bienvenido al Intensivo 90 Días!",
-            html: htmlAlumno,
-          });
-        }
+  // 🧾 MISMO FORMATO LINDO DE ADMIN (con formulario completo)
+  const htmlAdmin = buildAdminHtml({
+    modalidad: "intensivo 90 días",
+    alumnoNombre,
+    alumnoEmail,
+    profesorName: "Paula Toledo",
+    profEmail: "paauutooledo@gmail.com",
+    horariosTxt: horariosIntensivo,
+    reservasIds: [],   // no usamos reservas en este curso
+    pv,                // acá vienen dni, mail, whatsapp, programa, etc.
+  });
 
-        await transporter.sendMail({
-          from: FROM_EMAIL,
-          to: ACADEMY_EMAIL,
-          cc: "paauutooledo@gmail.com",
-          subject: `Nueva inscripción Intensivo 90 Días — ${alumnoNombre}`,
-          html: htmlAdmin,
-        });
-      } catch (e) {
-        console.error("[mail intensivo90] error envío", e);
-      }
-
-      return res.sendStatus(200);
+  try {
+    // Mail alumno
+    if (alumnoEmail) {
+      await transporter.sendMail({
+        from: FROM_EMAIL,
+        to: alumnoEmail,
+        subject: "¡Bienvenido al Intensivo 90 Días!",
+        html: htmlAlumno,
+      });
     }
+
+    // Mail admin + Paula
+    await transporter.sendMail({
+      from: FROM_EMAIL,
+      to: ACADEMY_EMAIL,
+      cc: "paauutooledo@gmail.com",
+      subject: `Nueva inscripción Intensivo 90 Días — ${alumnoNombre}`,
+      html: htmlAdmin,
+    });
+  } catch (e) {
+    console.error("[mail intensivo90] error envío", e);
+  }
+
+  return res.sendStatus(200);
+}
 
     // ===========================================
     // 4) MODALIDAD GRUPAL
